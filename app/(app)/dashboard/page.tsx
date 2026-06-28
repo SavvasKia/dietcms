@@ -1,6 +1,8 @@
 import { getCurrentUser } from '@/lib/auth'
 import { ensureTenantForUser } from '@/lib/tenant'
 
+export const dynamic = 'force-dynamic'
+
 export default async function Dashboard() {
   const user = await getCurrentUser()
   if (!user) return null

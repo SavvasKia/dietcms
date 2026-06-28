@@ -15,9 +15,9 @@
     "db:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
+    "@neondatabase/auth": "0.4.2-beta",
     "@neondatabase/serverless": "^1.1.0",
     "@sentry/nextjs": "^10.62.0",
-    "@stackframe/stack": "^2.8.108",
     "drizzle-orm": "^0.45.2",
     "next": "16.2.9",
     "posthog-js": "^1.395.0",

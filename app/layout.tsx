@@ -1,8 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { StackProvider, StackTheme } from "@stackframe/stack";
-import { stackServerApp } from "@/stack";
 import { Providers } from "@/app/providers";
 
 const geistSans = Geist({
@@ -31,11 +29,7 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <StackProvider app={stackServerApp}>
-          <StackTheme>
-            <Providers>{children}</Providers>
-          </StackTheme>
-        </StackProvider>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
