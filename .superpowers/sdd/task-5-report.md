@@ -41,6 +41,23 @@ No regressions. Integration tests are excluded from the unit suite via `exclude:
 
 No TypeScript errors.
 
+## Security Review Amendments (2026-06-28, commit 0ea51f7)
+
+### Fix 1 — userB positive control (Important)
+Added test `6. userB can insert and see their own note (positive control)` to `tests/integration/rls-isolation.test.ts`. Without this, a blanket-deny policy that silently forbids all writes would still pass tests 1–5. The new test proves the authenticated path is live for userB's own tenant.
+
+### Fix 2 — Nested transaction footgun warning (Minor)
+Added a comment above the `fn(tx as unknown as typeof authedDb)` cast in `db/authed-client.ts` warning that callers must NOT nest another `authedDb.transaction()` / `withUser()` inside `fn`, because a new pooled connection opens WITHOUT the `app.user_id` GUC (RLS context is lost).
+
+### Verification (post-amendment)
+
+```
+pnpm test:int → Test Files 1 passed (1) | Tests 6 passed (6) | Duration 2.51s
+  - test 6 (userB positive control): PASSED
+pnpm test     → Test Files 6 passed (6) | Tests 20 passed (20)
+pnpm typecheck → clean (no errors)
+```
+
 ## Follow-up Risks
 
 1. **`tenant_members` has no RLS.** The RLS policy on `notes` uses a subquery on `tenant_members`. Since `authenticated_backend` can read ALL rows in `tenant_members` (no policy restricts it), a compromised session can enumerate which users belong to which tenant via a direct query on that table. This is intentional for the spike, but real domain tables must add RLS on `tenant_members` before any user-facing feature exposes membership data.
