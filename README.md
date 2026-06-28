@@ -5,13 +5,7 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 First, run the development server:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
 pnpm dev
-# or
-bun dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
@@ -28,6 +22,23 @@ To learn more about Next.js, take a look at the following resources:
 - [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+
+## CI / Testing
+
+To set up and run tests, use the following commands:
+
+```bash
+pnpm typecheck    # Run TypeScript type checking
+pnpm lint         # Lint the codebase
+pnpm test         # Run unit tests
+pnpm test:e2e     # Run end-to-end tests
+```
+
+Note: Before running `pnpm test:e2e`, CI must run:
+```bash
+pnpm exec playwright install --with-deps chromium
+```
+This requires root/sudo privileges.
 
 ## Deploy on Vercel
 
