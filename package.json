@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "test:int": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@neondatabase/auth": "0.4.2-beta",
