@@ -15,6 +15,10 @@ export const authedDb = drizzle(authedPool, { schema })
 export async function withUser<T>(userId: string, fn: (tx: typeof authedDb) => Promise<T>): Promise<T> {
   return authedDb.transaction(async (tx) => {
     await tx.execute(sql`select set_config('app.user_id', ${userId}, true)`)
+    // WARNING: callers MUST NOT call a nested authedDb.transaction() / withUser()
+    // inside `fn`. A nested call opens a new pooled connection from authedPool
+    // WITHOUT the app.user_id GUC, so RLS context is lost and the inner
+    // transaction runs as if userId were empty (fail-closed, but silently wrong).
     return fn(tx as unknown as typeof authedDb)
   })
 }

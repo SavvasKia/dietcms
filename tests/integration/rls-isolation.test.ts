@@ -78,4 +78,12 @@ describe('RLS tenant isolation (Path B)', () => {
     const rows = await withUser('', (tx) => tx.select().from(notes))
     expect(rows.length).toBe(0)
   })
+
+  it('6. userB can insert and see their own note (positive control)', async () => {
+    const [rowB] = await withUser(userB, (tx) =>
+      tx.insert(notes).values({ tenantId: tenantIdB, body: 'Hello from B' }).returning(),
+    )
+    const rows = await withUser(userB, (tx) => tx.select().from(notes))
+    expect(rows.map((r) => r.id)).toContain(rowB.id)
+  })
 })
