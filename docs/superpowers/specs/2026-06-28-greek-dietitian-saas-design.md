@@ -45,13 +45,18 @@ Verified via multi-source research (2026-06-28):
 - **Product type:** all-in-one platform, phased — v1 = practice management for the
   dietitian. Client portal and content CMS are later phases.
 - **Business model:** commercial multi-tenant SaaS sold to many Greek dietitians.
-- **Stack:** Next.js (App Router) + Postgres.
+- **Stack:** Next.js (App Router) + React + Tailwind, deployed on **Vercel**.
 - **Food DB:** build own from public sources (Trichopoulou/HHF/USDA, Greek-first).
 - **Domain validation:** a practicing Greek dietitian is available to validate
   workflows, meal-plan structure, and charting needs.
 - **v1 scope:** single v1 release including myDATA billing.
-- **Architecture:** locked — multi-tenant + Postgres RLS + Drizzle ORM + Auth.js,
-  EU-region hosting.
+- **Architecture:** locked — multi-tenant + Postgres RLS + Drizzle ORM, EU-region
+  hosting.
+- **Database & auth:** **Neon** (serverless Postgres, EU region) + **Neon Auth**
+  (Stack Auth) for authentication; RLS policies key off the auth JWT.
+- **Observability:** **Sentry** (errors) + **PostHog** (product analytics, EU
+  Cloud) — both configured to never receive special-category/health data.
+- **Testing:** **Playwright** (E2E) + **Vitest** + React Testing Library (unit).
 
 ## 3. Goals / Non-goals
 
@@ -83,16 +88,42 @@ Verified via multi-source research (2026-06-28):
 - **Postgres Row-Level Security (RLS)** enforces isolation: every query runs under
   a session `tenant_id`; policies restrict rows to the current tenant. App bugs
   cannot leak cross-tenant data.
-- The app sets the tenant context per request (e.g. `SET LOCAL app.tenant_id`
-  inside a transaction) derived from the authenticated session.
+- Tenant context comes from the **Neon Auth JWT**: the authenticated user's
+  claims (`user_id` → tenant mapping) are available to RLS policies via Neon's
+  authenticated DB connection, so isolation is enforced from the verified token
+  rather than app-set session variables. A user→tenant membership table maps
+  identities to their tenant.
 
 ### 5.2 Stack
 - **Next.js App Router** — server components + server actions / route handlers.
-- **Postgres** hosted in an **EU region** (GDPR data residency).
-- **Drizzle ORM** — chosen over Prisma for explicit SQL and RLS-friendliness.
-- **Auth.js (NextAuth)** — dietitian authentication; email/password + optional
-  OAuth later.
-- **Encryption at rest** for the database; TLS in transit.
+- **React + Tailwind** — UI.
+- **Vercel** — hosting; serverless functions **pinned to an EU region** (GDPR data
+  residency — US region is non-compliant for health data).
+- **Neon** — serverless Postgres, **EU region**. Encryption at rest; TLS in
+  transit.
+- **Drizzle ORM** — chosen over Prisma for explicit SQL and RLS-friendliness;
+  works directly against Neon.
+- **Neon Auth (Stack Auth)** — dietitian authentication. Manages the user
+  identity store and issues JWTs whose claims (`user_id`, tenant) drive Postgres
+  RLS policies. Replaces Auth.js.
+
+### 5.4 Third-party processors & data-protection config
+All external services are GDPR **data processors**; each needs a signed DPA and
+must be configured to never receive special-category (health) data:
+- **Sentry** — `beforeSend` scrubs PII; request bodies/headers disabled; data
+  masked. EU data region. No client medical data in error context.
+- **PostHog** — **EU Cloud** (`eu.posthog.com`). Autocapture input masking ON
+  (mask all form fields); only non-identifying product events; never send
+  client/patient attributes.
+- **Neon / Vercel** — EU region; DPAs in place.
+- **myDATA provider** — processes invoice data (incl. client ΑΦΜ/name); covered by
+  the medical-billing legal basis and provider DPA.
+
+### 5.5 Observability & testing
+- **Sentry** for error tracking, **PostHog** for product analytics (both scoped
+  per §5.4).
+- **Vitest + React Testing Library** for unit/component tests.
+- **Playwright** for end-to-end flows (signup → client → meal plan → invoice).
 
 ### 5.3 Module boundaries
 Each module is a bounded unit with its own schema tables, service layer, and UI
@@ -112,9 +143,11 @@ other's tables.
 ## 6. Modules — features and why
 
 ### 6.1 Tenant & Auth
-- Dietitian signup, practice profile (name, ΑΦΜ/VAT, address — needed for
+- Dietitian signup/login via **Neon Auth**; on first login create a `tenant` and
+  a `tenant_members` row. Practice profile (name, ΑΦΜ/VAT, address — needed for
   invoices), subscription state (stub; real billing-for-subscription later).
-- **Why:** the multi-tenant boundary and the source of every row's `tenant_id`.
+- **Why:** the multi-tenant boundary and the source of every row's `tenant_id`;
+  the JWT that drives RLS originates here.
 
 ### 6.2 Client records
 - Demographics, contact, medical history, allergies, goals, notes/charting.
@@ -168,7 +201,9 @@ other's tables.
 ## 7. Data model sketch (initial)
 
 - `tenants(id, name, afm, address, subscription_state, created_at)`
-- `users(id, tenant_id, email, password_hash, role, ...)`
+- Identity/users are managed by **Neon Auth (Stack Auth)**; we keep a
+  `tenant_members(user_id, tenant_id, role)` table mapping auth identities to a
+  tenant and role (no password storage on our side).
 - `clients(id, tenant_id, name, dob, contact, medical_history, allergies, goals, ...)`
 - `consents(id, tenant_id, client_id, basis, scope, granted_at, withdrawn_at)`
 - `audit_log(id, tenant_id, actor_user_id, action, entity, entity_id, at)`
@@ -193,12 +228,15 @@ tenants, writable by none (admin-only seed).
 - All cross-tenant access attempts fail closed (RLS default deny).
 
 ## 9. Testing approach
-- **TDD** for service layers (meal-plan nutrient math, invoice/VAT calc,
-  consent/audit logic).
+- **Vitest + React Testing Library** — unit/component tests; **TDD** for service
+  layers (meal-plan nutrient math, invoice/VAT calc, consent/audit logic).
+- **Playwright** — E2E flows (signup → client → meal plan → myDATA invoice).
 - **RLS isolation tests**: assert tenant A cannot read/write tenant B's rows,
-  exercised at the DB layer.
+  exercised at the DB layer (two JWTs, same query, opposite results).
 - **myDATA integration tests** against a sandbox/mock of the provider/AADE.
 - **Food import tests**: unit normalization, dedup, language tagging.
+- **Privacy regression test**: assert no client/health fields reach Sentry or
+  PostHog payloads.
 
 ## 10. v1 build order (mitigates the Oct deadline risk)
 Front-load the moat so myDATA is not rushed last:
@@ -225,6 +263,14 @@ Front-load the moat so myDATA is not rushed last:
 - **Food DB commercial licensing** — HelTH/HHF "not publicly available" for
   commercial use; avoided in v1 by building from public-domain/citable sources,
   but legal review of source reuse is advised.
+- **Third-party data leakage** — Sentry/PostHog can silently capture health data
+  via autocapture/error context. Mitigated by §5.4 config + the privacy
+  regression test, but requires ongoing vigilance on every new form/event.
+- **Neon Auth + RLS wiring** — driving RLS from the auth JWT over Vercel
+  serverless (authenticated connection per request, pooling, cold starts) is the
+  riskiest infra integration; validate with a spike before building on it.
+- **EU region discipline** — every service (Neon, Vercel functions, Sentry,
+  PostHog) must be EU-pinned; a single US-region default breaks GDPR residency.
 
 ## 12. Success criteria (v1)
 - A Greek dietitian onboards and runs a real client end-to-end: record →
