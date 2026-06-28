@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1782669012529,
+      "tag": "0000_damp_kylun",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1782673288364,
+      "tag": "0001_yummy_captain_universe",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1782674132968,
+      "tag": "0002_breezy_doctor_faustus",
+      "breakpoints": true
+    }
+  ]
+}

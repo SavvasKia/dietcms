@@ -825,12 +825,11 @@ Expected: FAIL — `@/lib/analytics` not found.
 `lib/analytics.ts`:
 ```ts
 import posthog from 'posthog-js'
-
-const DENY = /(name|email|phone|afm|dob|birth|address|weight|height|bmi|body|medical|allergy|diagnos|note|client|patient)/i
+import { isDenied } from '@/lib/pii-denylist' // shared GDPR denylist (created in Task 6)
 
 export function assertSafeProps(props: Record<string, unknown>): void {
   for (const k of Object.keys(props)) {
-    if (DENY.test(k)) throw new Error(`analytics: denylisted prop "${k}" — never send personal/health data`)
+    if (isDenied(k)) throw new Error(`analytics: denylisted prop "${k}" — never send personal/health data`)
   }
 }
 
