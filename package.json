@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
+    "@sentry/nextjs": "^10.62.0",
     "@stackframe/stack": "^2.8.108",
     "drizzle-orm": "^0.45.2",
     "next": "16.2.9",
@@ -40,5 +41,10 @@
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.9"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@sentry/cli"
+    ]
   }
 }
