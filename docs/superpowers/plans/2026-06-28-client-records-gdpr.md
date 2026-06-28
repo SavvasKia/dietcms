@@ -100,7 +100,7 @@ export const clients = pgTable(
     address: text('address'),
     afm: text('afm'),
     medicalHistory: text('medical_history'),
-    allergies: text('allergies').array().notNull().default(sql`'{}'`),
+    allergies: text('allergies').array().notNull().default(sql`'{}'::text[]`),
     goals: text('goals'),
     notes: text('notes'),
     lawfulBasis: text('lawful_basis').notNull().default('art_9_2_h_healthcare'),
@@ -981,8 +981,12 @@ export async function eraseClient(userId: string, clientId: string): Promise<boo
   })
   if (!deleted) return false
 
-  // Anonymize all audit rows for this data subject (owner path). Retain the row,
-  // action, at, actor — null only the data-subject references.
+  // NOT fully transactional: the clinical delete commits above, then this owner-
+  // path anonymization runs as a separate statement. A crash in this window leaves
+  // audit_log rows with a dangling client_id uuid (no name/email — low PII risk).
+  // Acceptable for v1; a hardened version would reconcile on a sweep. Anonymize all
+  // audit rows for this data subject (owner path). Retain row, action, at, actor —
+  // null only the data-subject references.
   await db
     .update(auditLog)
     .set({ clientId: null, entityId: null, metadata: null })
@@ -1018,6 +1022,8 @@ git commit -m "feat: GDPR export + erasure (per-table policy)"
 
 **Goal:** A test that goes red when a future module adds a `client_id`-bearing table without wiring it into export + erasure. At n=1 the covered set is `{clients, client_consents, audit_log}`.
 
+**Guarantee level (be honest):** this is a **tripwire**, not a proof of correct wiring — it forces a new client-scoped table's identifier to appear in *both* the `exportClient` and `eraseClient` function bodies (closing the import-line false-green), and forces the dev to register the table→identifier mapping. The *behavioral* proof that wiring is correct lives in Task 5's `gdpr.test.ts` (seed → export-contains / erase-empties). When a future table is added, the dev adds both: a mapping entry here and a behavioral case in `gdpr.test.ts`.
+
 - [ ] **Step 1: Write the coverage test**
 
 `tests/unit/gdpr-coverage.test.ts`:
@@ -1028,33 +1034,49 @@ import { getTableConfig } from 'drizzle-orm/pg-core'
 import * as schema from '@/db/schema'
 
 // Tables that hold data about a client: the `clients` root plus any table with a
-// `client_id` column. Every one MUST be referenced by both export and erasure in
-// lib/gdpr.ts. A new uncovered table turns this test red.
+// `client_id` column. Every one MUST be referenced by BOTH exportClient and
+// eraseClient in lib/gdpr.ts. A new uncovered table turns this test red.
 function clientScopedTables(): string[] {
   const names: string[] = []
   for (const value of Object.values(schema)) {
-    // drizzle table objects work with getTableConfig; skip everything else
     let cfg
     try {
       cfg = getTableConfig(value as never)
     } catch {
-      continue
+      continue // not a drizzle table
     }
     const cols = cfg.columns.map((c) => c.name)
-    if (cfg.name === 'clients' || cols.includes('client_id')) {
-      names.push(cfg.name)
-    }
+    if (cfg.name === 'clients' || cols.includes('client_id')) names.push(cfg.name)
   }
   return names
 }
 
+// Extract a single exported function body by brace-matching from its declaration.
+// Scopes the identifier check to the function, so an import line cannot satisfy it.
+function functionBody(src: string, fnName: string): string {
+  const start = src.search(new RegExp(`function\\s+${fnName}\\b`))
+  if (start === -1) throw new Error(`function ${fnName} not found in lib/gdpr.ts`)
+  const open = src.indexOf('{', start)
+  let depth = 0
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}') {
+      depth--
+      if (depth === 0) return src.slice(open, i + 1)
+    }
+  }
+  throw new Error(`unbalanced braces parsing ${fnName}`)
+}
+
 describe('GDPR coverage', () => {
   const src = readFileSync(new URL('../../lib/gdpr.ts', import.meta.url), 'utf8')
+  const exportBody = functionBody(src, 'exportClient')
+  const eraseBody = functionBody(src, 'eraseClient')
 
-  it('every client-scoped table is referenced in lib/gdpr.ts', () => {
+  it('every client-scoped table is wired into BOTH exportClient and eraseClient', () => {
     const tables = clientScopedTables()
     expect(tables).toEqual(expect.arrayContaining(['clients', 'client_consents', 'audit_log']))
-    // map table name -> drizzle export identifier used in gdpr.ts
+    // table name -> drizzle export identifier referenced in gdpr.ts
     const tableToIdent: Record<string, string> = {
       clients: 'clients',
       client_consents: 'clientConsents',
@@ -1064,13 +1086,16 @@ describe('GDPR coverage', () => {
       const ident = tableToIdent[t]
       expect(
         ident,
-        `No known gdpr.ts identifier for table "${t}". A new client-scoped table was added — wire it into exportClient + eraseClient and register its identifier here.`,
+        `Table "${t}" has no registered gdpr.ts identifier. A new client-scoped table was added — wire it into exportClient + eraseClient, add a behavioral case in tests/integration/gdpr.test.ts, and register it here.`,
       ).toBeTruthy()
-      expect(src.includes(ident)).toBe(true)
+      expect(exportBody.includes(ident), `${t} not referenced in exportClient`).toBe(true)
+      expect(eraseBody.includes(ident), `${t} not referenced in eraseClient`).toBe(true)
     }
   })
 })
 ```
+
+> Note: `eraseClient` references `clients`, `clientConsents`, and `auditLog` in its body (delete clinical rows + anonymize audit). `exportClient` references all three (the dump). Both bodies therefore contain all three identifiers — the test passes at n=1.
 
 - [ ] **Step 2: Run it, verify it passes**
 
@@ -1107,6 +1132,7 @@ git commit -m "test: GDPR coverage forcing-test for client-scoped tables"
 
 ## Self-Review notes (author)
 
-- **Spec coverage:** clients CRUD (T2), lawful_basis as fact (T1 column), withdrawable consents separate from basis (T4), append-only audit (T3), operative export+erasure with per-table policy (T5), coverage forcing-test (T6), per-table RLS + isolation tests (T1/T3/T4), invoice retention deferred as documented slot (T5 policy comment). All §-items mapped.
+- **Spec coverage:** clients CRUD (T2), lawful_basis as fact (T1 column), withdrawable consents separate from basis (T4), append-only audit (T3), operative export+erasure with per-table policy + behavioral proof (T5), coverage **tripwire** (T6 — forces new client-scoped tables into both gdpr functions; behavioral correctness proven in T5, not T6), per-table RLS + isolation tests (T1/T3/T4), invoice retention deferred as documented slot (T5 policy comment). All §-items mapped.
+- **Dispatch reminders (load-bearing assumptions — name these to the implementer so a grant error isn't a rabbit-hole):** (1) foundation's `ALTER DEFAULT PRIVILEGES` grants `authenticated_backend` CRUD on new tables — a `permission denied for table clients` means that path didn't cover this table, NOT a model bug; do not redesign RLS. (2) Erasure's owner-path audit anonymization works because `neondb_owner` has BYPASSRLS (foundation already seeds FORCE-RLS tables via owner). (3) `getClient` writes a `view` audit row on every read — intended (clinical access logging); reads are deliberately non-idempotent.
 - **Type consistency:** service signatures `(userId, …)`; `recordAudit(tx, args)` takes the live tx; `ConsentScope` reused across consents.ts; `ClientExport` shape matches the gdpr test.
 - **Known deviation logged:** `audit_log` erasure uses the owner connection — the single sanctioned request-path owner write, documented in Global Constraints and T5.
