@@ -52,8 +52,11 @@ Verified via multi-source research (2026-06-28):
 - **v1 scope:** single v1 release including myDATA billing.
 - **Architecture:** locked — multi-tenant + Postgres RLS + Drizzle ORM, EU-region
   hosting.
-- **Database & auth:** **Neon** (serverless Postgres, EU region) + **Neon Auth**
-  (Stack Auth) for authentication; RLS policies key off the auth JWT.
+- **Database & auth:** **Neon** (serverless Postgres, EU region) + **Neon Auth
+  API-only** (`@neondatabase/auth`, Better Auth — `createNeonAuth`, configured via
+  `NEON_AUTH_BASE_URL` + `NEON_AUTH_COOKIE_SECRET`) for authentication; we build
+  our own Greek-first auth UI. RLS policies key off the auth JWT (verified via the
+  Neon Auth JWKS endpoint). (Earlier assumed Stack Auth; pivoted during build.)
 - **Observability:** **Sentry** (errors) + **PostHog** (product analytics, EU
   Cloud) — both configured to never receive special-category/health data.
 - **Testing:** **Playwright** (E2E) + **Vitest** + React Testing Library (unit).
