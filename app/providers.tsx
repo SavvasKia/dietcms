@@ -5,7 +5,7 @@ import { useEffect } from 'react'
 
 export function Providers({ children }: { children: React.ReactNode }) {
   useEffect(() => {
-    if (!(posthog as any).__loaded) {
+    if (!(posthog as unknown as { __loaded?: boolean }).__loaded) {
       posthog.init(process.env.NEXT_PUBLIC_POSTHOG_KEY!, {
         api_host: process.env.NEXT_PUBLIC_POSTHOG_HOST, // https://eu.i.posthog.com
         autocapture: { dom_event_allowlist: ['click'] },
