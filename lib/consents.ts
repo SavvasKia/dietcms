@@ -64,12 +64,16 @@ type Consent = typeof clientConsents.$inferSelect
 async function reachableClient(
   tx: typeof authedDb,
   clientId: string,
+  opts: { lock?: boolean } = {},
 ): Promise<{ id: string; tenantId: string } | null> {
-  const [row] = await tx
+  const q = tx
     .select({ id: clients.id, tenantId: clients.tenantId })
     .from(clients)
     .where(and(eq(clients.id, clientId), isNull(clients.deletedAt)))
     .limit(1)
+  // `lock` is opt-in and used ONLY by grantConsent: taking a write lock on the
+  // read paths would stall every reader behind any in-flight grant.
+  const [row] = opts.lock ? await q.for('update') : await q
   return row ?? null
 }
 
@@ -138,7 +142,13 @@ export async function grantConsent(
 ): Promise<Consent | null> {
   assertScope(scope)
   return withUser(userId, async (tx) => {
-    const client = await reachableClient(tx, clientId)
+    // FOR UPDATE: the supersede below is withdraw-then-insert, so two concurrent
+    // grants of one (client_id, scope) can both see zero active rows, both
+    // insert, and the loser trips client_consents_one_active_per_scope — a 500
+    // for a double-click. Locking the parent client row serialises the critical
+    // section. The FK's own FOR KEY SHARE lock does not: two KEY SHARE holders
+    // are compatible with each other.
+    const client = await reachableClient(tx, clientId, { lock: true })
     if (!client) {
       await recordDeny(tx)
       return null
