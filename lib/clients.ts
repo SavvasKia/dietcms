@@ -125,17 +125,25 @@ export function getClient(userId: string, clientId: string): Promise<Client | nu
 
 export function listClients(userId: string): Promise<Client[]> {
   return withUser(userId, async (tx) => {
+    // No membership → RLS exposes no client rows, so no access happened and
+    // there is nothing to log. Matches getClient/updateClient/softDeleteClient,
+    // which likewise skip the audit row when nothing was reachable.
+    const [membership] = await tx
+      .select({ tenantId: tenantMembers.tenantId })
+      .from(tenantMembers)
+      .limit(1)
+    if (!membership) return []
+
     const rows = await tx.select().from(clients).where(isNull(clients.deletedAt))
     // Spec §5: a list view is ONE audit row with entity_id (and client_id) null,
-    // not one per row. Unconditional — unlike the read-one paths there is no
-    // "nothing found" case to skip, so a membership-less caller now fails closed
-    // here instead of getting an unaudited empty list.
+    // not one per row.
     await recordAudit(tx, {
       action: 'view',
       entity: 'client',
       entityId: null,
       clientId: null,
       metadata: { count: rows.length },
+      tenantId: membership.tenantId,
     })
     return rows
   })

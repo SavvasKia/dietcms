@@ -310,11 +310,17 @@ describe('client-service audit rows (list view)', () => {
     expect(rows).toHaveLength(2)
   })
 
-  it('listClients fails closed for a caller with no membership', async () => {
-    // Behaviour change vs Task 2 (it returned []): the list audit row is
-    // unconditional, so an unauditable list must not succeed.
-    const chain = await errorChain(() => listClients(userNone))
-    expect(chain).toMatch(/no tenant for user/i)
+  it('listClients returns [] for a membership-less caller and audits nothing', async () => {
+    // Task 2's contract, restored. Task 3 briefly threw here on the theory that
+    // "an unauditable list must not succeed" — but the throw came out of
+    // recordAudit's own membership lookup, BEFORE any insert, so it produced no
+    // audit row either. It only turned [] into a 500 for a caller racing
+    // ensureTenantForUser's bootstrap.
+    expect(await listClients(userNone)).toEqual([])
+
+    // Owner connection: userNone has no tenant, so it cannot read audit_log itself.
+    const rows = await db.select().from(auditLog).where(eq(auditLog.actorUserId, userNone))
+    expect(rows).toHaveLength(0)
   })
 })
 
