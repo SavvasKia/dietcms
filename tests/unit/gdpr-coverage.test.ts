@@ -75,8 +75,19 @@ export function clientScopedTables(schema: Record<string, unknown>): string[] {
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+/** Loose match, used for helper-name traversal: over-reaching here costs nothing. */
 const references = (text: string, ident: string) =>
   new RegExp(`\\b${escapeRe(ident)}\\b`).test(text)
+
+/**
+ * Match for the table check. Excludes `ident:` — a property KEY, not a use of
+ * the table. Without this, `return { client, consents, auditLog: audit }` alone
+ * keeps `audit_log` green in `exportClient` even after the read is deleted.
+ * Still satisfiable by `{ auditLog }` shorthand or a comment naming the
+ * identifier: this is a tripwire for absence, not an assertion of use.
+ */
+const referencesTable = (text: string, ident: string) =>
+  new RegExp(`\\b${escapeRe(ident)}\\b(?!\\s*:)`).test(text)
 
 /** Index of the `{` opening a body, scanning past a balanced parameter list. */
 function bodyBraceIndex(src: string, parenIndex: number, arrow: boolean): number {
@@ -204,7 +215,7 @@ describe('GDPR coverage tripwire', () => {
 
       for (const entry of ENTRY_POINTS) {
         expect(
-          references(effective.get(entry)!, ident),
+          referencesTable(effective.get(entry)!, ident),
           `Table "${table}" (identifier \`${ident}\`) is not referenced anywhere in\n` +
             `${entry}'s effective body in lib/gdpr.ts.\n` +
             'The effective body includes helpers called from it WITHIN lib/gdpr.ts, so a\n' +
@@ -262,6 +273,18 @@ describe('GDPR coverage tripwire', () => {
     const body = effectiveBody(namedBodies(fixture), 'entry')
     expect(references(body, 'used')).toBe(true)
     expect(references(body, 'orphan')).toBe(false)
+  })
+
+  it('does not count a property key as a table reference', () => {
+    // `return { client, consents, auditLog: audit }` in exportClient spells the
+    // identifier without reading the table; without the exclusion, deleting the
+    // audit read from exportClient stayed green off that key alone.
+    const body = '{ return { rows, auditLog: audit } }'
+    expect(references(body, 'auditLog')).toBe(true) // loose: traversal match
+    expect(referencesTable(body, 'auditLog')).toBe(false) // strict: table check
+    expect(referencesTable('{ from(auditLog).where(eq(auditLog.clientId, x)) }', 'auditLog')).toBe(
+      true,
+    )
   })
 
   it('throws loudly rather than passing when an entry point is missing', () => {

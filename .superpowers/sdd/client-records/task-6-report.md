@@ -13,9 +13,9 @@ A source-text tripwire over `lib/gdpr.ts`, per the brief's replacement mechanism
    - `[export] const NAME = [async] (...) => { }`
    The body brace is found by scanning past a *balanced* parameter list (not `indexOf('{')`, which the plan used and which breaks on destructured params), and the arrow form requires a `=>` between the params and the brace so `const x = (a + b)` is not captured as a code block.
 3. **`effectiveBody(bodies, entry)`** — the entry point's own body plus, to a fixpoint, the body of every mapped name referenced in the accumulated text. Cycle-safe via a `visited` set (seeded with the entry, so self-recursion is also safe). Throws when the entry point is absent, and throws when the effective body is empty-after-stripping-whitespace-and-braces.
-4. **Assertion** — for each detected table: registered in `tableToIdent` (else a red naming the table and the three required actions), and its identifier appears — `\b`-bounded, escaped, not `includes` — in *both* entry points' effective bodies (else a red naming the entry point and explaining that module-local helpers count while other files do not).
+4. **Assertion** — for each detected table: registered in `tableToIdent` (else a red naming the table and the three required actions), and its identifier appears in *both* entry points' effective bodies (else a red naming the entry point and explaining that module-local helpers count while other files do not). The match is `\b`-bounded and regex-escaped, never `includes`, and excludes a trailing `:` so a property key is not mistaken for a use — see forcing test D.
 5. **Vacuous-pass guard** — `expect(tables).toEqual(expect.arrayContaining(['clients','client_consents','audit_log']))` before the loop, so an empty `tables` (e.g. `getTableConfig` starting to throw for every export) cannot satisfy every `for` assertion silently.
-6. **Three mechanism tests on synthetic fixtures**, not on `lib/gdpr.ts`: helper-reachable resolution across a cycle, import-only/type-only exclusion, and loud throw on a missing entry point. Fixture-based deliberately — asserting "`clients` is absent from `exportClient`'s own body" against the real file would turn a legitimate inlining of that read into a false red (this is forcing test C part 2, below).
+6. **Four mechanism tests on synthetic fixtures**, not on `lib/gdpr.ts`: helper-reachable resolution across a cycle, import-only/type-only exclusion, property-key exclusion, and loud throw on a missing entry point. Fixture-based deliberately — asserting "`clients` is absent from `exportClient`'s own body" against the real file would turn a legitimate inlining of that read into a false red (this is forcing test C part 2, below).
 
 Header comment states plainly that this is a tripwire, not proof of correct wiring; the behavioural proof is `tests/integration/gdpr.test.ts`.
 
@@ -55,7 +55,7 @@ column) must be covered by GDPR export and erasure. Do all three:
   3. Register it in tableToIdent in this file: 'coverage_probe': '<drizzleExport>'.
 If the table is legally retained and must NOT be erased, that is a policy
 decision — do not silence this test; see the POLICY SLOT note in lib/gdpr.ts.: expected undefined to be truthy
-      Tests  1 failed | 3 passed (4)
+      Tests  1 failed | 3 passed (4)  # pre-fix run, 4 tests in the file
 ```
 
 Restored from the byte-identical backup and re-ran:
@@ -89,7 +89,7 @@ read extracted into a local helper still counts. It does NOT include the
 import block, nor helpers living in other files: if you moved this read into
 another module, this red is a false alarm — inline the reference or extend
 this test to follow that module.: expected false to be true
-      Tests  1 failed | 3 passed (4)
+      Tests  1 failed | 3 passed (4)  # pre-fix run, 4 tests in the file
 ```
 
 Widening to helpers did **not** swallow the import block, and a type-position reference does not count either. Restored:
@@ -136,29 +136,52 @@ cmp after C3: byte-identical
 git diff lib+db: clean
 ```
 
-### Side experiment — a raw-text false GREEN that does exist
+### D — a property KEY alone does not count (the false green that DID exist)
 
-Predicted during review, so I measured it. Removed `exportClient`'s `auditLog` read but left the return-object property **key** `auditLog: audit`:
+Found by review, then fixed, then turned into a fourth forcing run. Removing `exportClient`'s `auditLog` read while leaving the return-object property **key** `auditLog: audit` in place was **green** against the first version of this test: the `audit_log` x `exportClient` cell had no tripwire at all.
+
+Fix: the table check uses a stricter matcher than the traversal.
+
+```ts
+const referencesTable = (text: string, ident: string) =>
+  new RegExp(`\\b${escapeRe(ident)}\\b(?!\\s*:)`).test(text)   // excludes `ident:`
+```
+
+The loose `references` is kept for helper-name traversal — over-reaching there costs nothing and produces fewer false reds. Unmodified code is still green with the exclusion in place (`from(auditLog)`, `auditLog.clientId`, `.update(auditLog)`, `from(clients)`, `clients.id`, `.delete(clientConsents)` all sit before `.` / `)` / `,`), and the same mutation now goes red:
 
 ```
+--- baseline green (5 tests) ---
+      Tests  5 passed (5)
+
+--- FORCING TEST D: auditLog read removed from exportClient, property key left -> red expected ---
 126:    return { client, consents, auditLog: audit }
- Test Files  1 passed (1)
-      Tests  4 passed (4)
+195:    .update(auditLog)
+ FAIL  tests/unit/gdpr-coverage.test.ts > GDPR coverage tripwire > every client-scoped table is wired into BOTH exportClient and eraseClient
+AssertionError: Table "audit_log" (identifier `auditLog`) is not referenced anywhere in
+exportClient's effective body in lib/gdpr.ts.
+[...]: expected false to be true
+
+cmp after D: byte-identical
+git diff lib+db: clean
+--- restored green ---
+      Tests  5 passed (5)
 ```
 
-Still green. The effective body is raw text, so property keys, comments and string literals all count as references. Here it is a coincidence that the key spells the identifier; it means the test cannot distinguish "reads the table" from "mentions the word". It is a tripwire for *absence*, not an assertion of *use* — the integration suite is what proves use. (Luck worth noting: the doc-comments in `lib/gdpr.ts` say `client_consents` / `audit_log` in snake_case, so they do not collide with the camelCase identifiers. Rewriting a comment to say `clientConsents` would create the same kind of false green.)
+A fixture test (`does not count a property key as a table reference`) pins the discrimination so it cannot regress.
+
+**Residual, documented in the file header and not fixed:** `{ auditLog }` shorthand, a comment, or a string literal naming the identifier inside any reachable body still satisfies the check. It is a tripwire for *absence*, not an assertion of *use* — the integration suite proves use. (Luck worth noting: the doc-comments in `lib/gdpr.ts` say `client_consents` / `audit_log` in snake_case, so they do not collide with the camelCase identifiers. Rewriting a comment to say `clientConsents` would recreate this class of false green.)
 
 ## Verification
 
 ```
-pnpm exec vitest run tests/unit/gdpr-coverage.test.ts   4 passed (4)
-pnpm test                                              8 files, 25 passed (25)
+pnpm exec vitest run tests/unit/gdpr-coverage.test.ts   5 passed (5)
+pnpm test                                              8 files, 26 passed (26)
 pnpm test:int                                          5 files, 117 passed (117)
 pnpm typecheck                                         clean (tsc --noEmit, no output)
 pnpm lint                                              clean (eslint ., no output)
 ```
 
-Unit count is **25**, not the brief's predicted 22: the file adds 4 tests, not 1 — the tripwire plus three tests of the parsing/traversal mechanism itself.
+Unit count is **26**, not the brief's predicted 22: the file adds 5 tests, not 1 — the tripwire plus four tests of the parsing/traversal/matching mechanism itself.
 
 Final `git status`: only the intended additions (test file, brief, this report). No `db/schema.ts` edit, no new `db/migrations/` entry, no probe file.
 
@@ -197,4 +220,4 @@ Better homes, in order of preference:
 2. A separate vitest project/tag (e.g. `tests/gates/`) excluded from the default watch run.
 3. Where it is now.
 
-Reason to leave it in place today: the module is closing, and `tests/unit/` is the only wired-up suite that runs in CI without a database. Moving it needs a new npm script and a CI step, which is a foundation-level change and out of this task's scope. I would file it as a follow-up: *"move the GDPR coverage tripwire out of the unit suite into a CI policy gate"*.
+Reason to leave it in place today: the module is closing, and `tests/unit/` is the only wired-up suite that runs in CI without a database — `.github/workflows/ci.yml` runs `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm test:e2e` and never `pnpm test:int`, so `pnpm test` is the only DB-free gate that would actually execute this file. Moving it needs a new npm script and a CI step, which is a foundation-level change and out of this task's scope. I would file it as a follow-up: *"move the GDPR coverage tripwire out of the unit suite into a CI policy gate"*.
