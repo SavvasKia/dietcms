@@ -1,4 +1,4 @@
-import { and, eq, isNull } from 'drizzle-orm'
+import { and, eq, isNull, sql } from 'drizzle-orm'
 import { authedDb, withUser } from '@/db/authed-client'
 import { clients, tenantMembers } from '@/db/schema'
 
@@ -17,6 +17,50 @@ export type NewClient = {
   notes?: string
 }
 
+// Runtime whitelist of caller-writable columns. Everything not listed here is
+// dropped before it reaches the DB, so a request body cannot reach id,
+// tenantId, createdAt, lawfulBasis (a legal fact, not user input) or deletedAt
+// — a `{ deletedAt: null }` patch would otherwise resurrect an erased client.
+// `satisfies` rejects a typo or a key that isn't on NewClient.
+const NEW_CLIENT_KEYS = [
+  'firstName',
+  'lastName',
+  'dob',
+  'sex',
+  'email',
+  'phone',
+  'address',
+  'afm',
+  'medicalHistory',
+  'allergies',
+  'goals',
+  'notes',
+] as const satisfies readonly (keyof NewClient)[]
+
+// The other direction: adding a field to NewClient without listing it above
+// makes this alias resolve to `false`, which fails the `extends true` bound.
+type Assert<T extends true> = T
+export type NewClientKeysAreComplete = Assert<
+  Exclude<keyof NewClient, (typeof NEW_CLIENT_KEYS)[number]> extends never ? true : false
+>
+
+/** Keep only whitelisted keys. Validation also belongs at the route layer, but
+ *  this service is reachable from route handlers, server actions and the Task 5
+ *  GDPR paths — a route-only guard is bypassed by any of them. */
+function pickClientFields(input: Partial<NewClient>): Partial<NewClient> {
+  const src = input as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  for (const key of NEW_CLIENT_KEYS) {
+    if (src[key] !== undefined) out[key] = src[key]
+  }
+  return out as Partial<NewClient>
+}
+
+// All mutation timestamps come from the DB clock (`now()` = transaction start),
+// the same source as the columns' defaultNow(). Using the app clock here let a
+// skewed function host persist updated_at < created_at.
+const dbNow = sql`now()`
+
 type Client = typeof clients.$inferSelect
 
 // Reads the caller's tenant_id from tenant_members under RLS (returns only the
@@ -34,7 +78,13 @@ export function createClient(userId: string, input: NewClient): Promise<Client> 
     const tenantId = await callerTenantId(tx)
     const [row] = await tx
       .insert(clients)
-      .values({ ...input, tenantId })
+      .values({
+        ...pickClientFields(input),
+        // Restated because the whitelist returns a Partial and these are NOT NULL.
+        firstName: input.firstName,
+        lastName: input.lastName,
+        tenantId,
+      })
       .returning()
     return row
   })
@@ -63,7 +113,7 @@ export function updateClient(
   return withUser(userId, async (tx) => {
     const [row] = await tx
       .update(clients)
-      .set({ ...patch, updatedAt: new Date() })
+      .set({ ...pickClientFields(patch), updatedAt: dbNow })
       .where(and(eq(clients.id, clientId), isNull(clients.deletedAt)))
       .returning()
     return row ?? null
@@ -74,7 +124,9 @@ export function softDeleteClient(userId: string, clientId: string): Promise<bool
   return withUser(userId, async (tx) => {
     const rows = await tx
       .update(clients)
-      .set({ deletedAt: new Date() })
+      // A soft-delete is a mutation: bump updatedAt too, or it goes stale and
+      // Task 5's erasure logic reads a timestamp that predates the deletion.
+      .set({ deletedAt: dbNow, updatedAt: dbNow })
       .where(and(eq(clients.id, clientId), isNull(clients.deletedAt)))
       .returning({ id: clients.id })
     return rows.length > 0

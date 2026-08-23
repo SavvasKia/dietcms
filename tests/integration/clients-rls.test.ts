@@ -165,11 +165,10 @@ describe('client-service', () => {
     expect(c?.goals).toBe('lose 5kg')
     expect(c?.firstName).toBe('Patch') // unpatched fields survive
     // No DB trigger maintains updated_at — the service is the only writer, so
-    // this is the only proof it happened.
-    // created.updatedAt is the DB clock (defaultNow()), the patch is the app clock,
-    // so log the margin: a shrinking delta means clock skew is eating this assertion.
+    // this is the only proof it happened. Both sides are the DB clock (create
+    // uses defaultNow(), the patch uses now()), so the delta cannot be eaten by
+    // app/DB clock skew: the update transaction simply starts later.
     const delta = c!.updatedAt.getTime() - created.updatedAt.getTime()
-    console.log(`updatedAt delta ms = ${delta}`)
     expect(delta, `updatedAt did not advance (delta ${delta}ms)`).toBeGreaterThan(0)
     expect(c!.createdAt.getTime()).toBe(created.createdAt.getTime())
   })
@@ -191,6 +190,56 @@ describe('client-service', () => {
     const created = await createClient(userS, { firstName: 'Dead', lastName: 'D' })
     expect(await softDeleteClient(userS, created.id)).toBe(true)
     expect(await updateClient(userS, created.id, { goals: 'nope' })).toBeNull()
+  })
+
+  it('updateClient cannot resurrect a soft-deleted client via a deletedAt patch', async () => {
+    const created = await createClient(userS, { firstName: 'Erased', lastName: 'E' })
+    expect(await softDeleteClient(userS, created.id)).toBe(true)
+
+    await updateClient(userS, created.id, { deletedAt: null } as never)
+    expect(await getClient(userS, created.id)).toBeNull()
+
+    // Locks the isNull(deletedAt) predicate, NOT the whitelist: the row is
+    // already out of the UPDATE's scope, so the patch matches zero rows either
+    // way. The whitelist is what the next test proves.
+    const [raw] = await db.select().from(clients).where(eq(clients.id, created.id))
+    expect(raw.deletedAt).not.toBeNull()
+  })
+
+  it('updateClient drops non-whitelisted keys on a LIVE client', async () => {
+    const created = await createClient(userS, { firstName: 'Live', lastName: 'L' })
+    const forgedCreatedAt = new Date('2000-01-01T00:00:00Z')
+
+    // The real mass-assignment surface. Without the service whitelist, a parsed
+    // JSON body could soft-delete a client without going through
+    // softDeleteClient (bypassing Task 3's audit hook), rewrite the GDPR lawful
+    // basis, or backdate created_at.
+    const patched = await updateClient(userS, created.id, {
+      goals: 'legit',
+      deletedAt: new Date(),
+      lawfulBasis: 'art_6_1_a_consent',
+      createdAt: forgedCreatedAt,
+    } as never)
+
+    expect(patched?.goals).toBe('legit') // whitelisted key still applies
+    expect(patched?.deletedAt).toBeNull()
+    expect(patched?.lawfulBasis).toBe('art_9_2_h_healthcare')
+    expect(patched?.createdAt.getTime()).toBe(created.createdAt.getTime())
+    // Still reachable — the smuggled deletedAt did not land.
+    expect((await getClient(userS, created.id))?.id).toBe(created.id)
+  })
+
+  it('createClient cannot override tenantId or lawfulBasis', async () => {
+    const c = await createClient(userS, {
+      firstName: 'Injected',
+      lastName: 'I',
+      tenantId: tenantIdOther,
+      lawfulBasis: 'art_6_1_a_consent',
+      id: '00000000-0000-0000-0000-000000000001',
+    } as never)
+    expect(c.tenantId).toBe(tenantIdS)
+    expect(c.lawfulBasis).toBe('art_9_2_h_healthcare')
+    expect(c.id).not.toBe('00000000-0000-0000-0000-000000000001')
   })
 
   it('another tenant cannot read, list, update or soft-delete this tenant client', async () => {
