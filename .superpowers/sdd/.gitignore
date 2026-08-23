@@ -1,0 +1,3 @@
+# Track briefs, reports and progress.md — the only durable record of SDD task state.
+# Review diffs are regenerable from git and run to hundreds of KB; keep them local.
+*.diff

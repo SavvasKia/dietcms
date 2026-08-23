@@ -46,4 +46,7 @@ next-env.d.ts
 /playwright-report/
 
 # local config / superpowers
-.superpowers/
+# sdd/ is the only durable record of task briefs, reports and progress — track it.
+# Review diffs are regenerable from git and can run to hundreds of KB; keep those out.
+.superpowers/*
+!.superpowers/sdd/
