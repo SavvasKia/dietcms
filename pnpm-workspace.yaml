@@ -2,3 +2,5 @@ allowBuilds:
   '@sentry/cli': true
   core-js: true # posthog-js polyfill postinstall
   esbuild: true
+  sharp: true # next/image optimiser, native binary
+  unrs-resolver: true # eslint-config-next resolver, native binary
