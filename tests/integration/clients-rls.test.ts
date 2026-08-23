@@ -5,6 +5,23 @@ import { withUser } from '../../db/authed-client'
 import { tenants, tenantMembers, clients } from '../../db/schema'
 import { eq, or } from 'drizzle-orm'
 
+/** Drizzle wraps pg errors ("Failed query: …") and puts the real one in `.cause`.
+ *  Flatten the chain so an assertion can match the actual Postgres message. */
+async function errorChain(fn: () => Promise<unknown>): Promise<string> {
+  const err = await fn().then(
+    () => null,
+    (e: unknown) => e,
+  )
+  expect(err, 'expected the query to reject').toBeTruthy()
+  const messages: string[] = []
+  let cur: unknown = err
+  while (cur instanceof Error) {
+    messages.push(cur.message)
+    cur = cur.cause
+  }
+  return messages.join(' | ')
+}
+
 const run = Date.now().toString(36)
 const userA = `cli-a-${run}`
 const userB = `cli-b-${run}`
@@ -39,21 +56,26 @@ describe('clients RLS isolation', () => {
   })
 
   it('userA sees their own client', async () => {
+    expect(clientIdA).toBeTruthy() // guard: without it the isolation assertions pass vacuously
     const rows = await withUser(userA, (tx) => tx.select().from(clients))
     expect(rows.map((r) => r.id)).toContain(clientIdA)
   })
 
   it("userB does NOT see userA's client", async () => {
+    expect(clientIdA).toBeTruthy() // guard: not.toContain(undefined) would pass on a broken insert
     const rows = await withUser(userB, (tx) => tx.select().from(clients))
     expect(rows.map((r) => r.id)).not.toContain(clientIdA)
   })
 
   it('cross-tenant insert is rejected by WITH CHECK', async () => {
-    await expect(
+    // Match the RLS error specifically: a bare toThrow() also passes on
+    // permission denied / NOT NULL violations / network failure.
+    const chain = await errorChain(() =>
       withUser(userB, (tx) =>
         tx.insert(clients).values({ tenantId: tenantIdA, firstName: 'evil', lastName: 'x' }),
       ),
-    ).rejects.toThrow()
+    )
+    expect(chain).toMatch(/row-level security/i)
   })
 
   it('empty userId sees zero rows (fail-closed)', async () => {
