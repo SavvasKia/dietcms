@@ -1,4 +1,14 @@
-import { pgTable, uuid, text, timestamp, date, jsonb, primaryKey, unique } from 'drizzle-orm/pg-core'
+import {
+  pgTable,
+  uuid,
+  text,
+  timestamp,
+  date,
+  jsonb,
+  primaryKey,
+  unique,
+  uniqueIndex,
+} from 'drizzle-orm/pg-core'
 import { pgPolicy } from 'drizzle-orm/pg-core'
 import { sql } from 'drizzle-orm'
 
@@ -116,6 +126,41 @@ export const auditLog = pgTable(
   },
   (t) => [
     pgPolicy('audit_log_tenant_isolation', {
+      for: 'all',
+      to: 'authenticated_backend',
+      using: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,
+      withCheck: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,
+    }),
+  ],
+).enableRLS()
+
+// Consent records (spec §4). Withdrawal sets `withdrawn_at` and NEVER deletes:
+// the trail of what the client agreed to, and when, is itself the evidence.
+// Unlike audit_log this table keeps the full CRUD grant — withdrawal is an
+// UPDATE on the request path.
+//
+// `client_consents_one_active_per_scope` is partial ON PURPOSE: it forbids two
+// simultaneously-active rows for one (client_id, scope), while still allowing an
+// unlimited history of withdrawn rows so a client can re-consent. Without the
+// WHERE predicate it would forbid re-granting after withdrawal.
+export const clientConsents = pgTable(
+  'client_consents',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    clientId: uuid('client_id')
+      .notNull()
+      .references(() => clients.id, { onDelete: 'cascade' }),
+    scope: text('scope').notNull(),
+    grantedAt: timestamp('granted_at', { withTimezone: true }).notNull().defaultNow(),
+    withdrawnAt: timestamp('withdrawn_at', { withTimezone: true }),
+    textVersion: text('text_version').notNull(),
+  },
+  (t) => [
+    uniqueIndex('client_consents_one_active_per_scope')
+      .on(t.clientId, t.scope)
+      .where(sql`withdrawn_at is null`),
+    pgPolicy('client_consents_tenant_isolation', {
       for: 'all',
       to: 'authenticated_backend',
       using: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,
