@@ -66,13 +66,12 @@ explicitly chose in the supersede decision. Not a fix to make silently.
 
 ## Open items for the owner
 
-1. **`8b891bf` is stranded.** The ESLint DB-clock rule and `test:int:file` live on
-   `chore/ci-integration-gate`, which must not merge until the Neon secrets exist.
-   So the enforcement mechanism for a recorded decision cannot reach `main`, and
-   neither can the runner. Both files (`eslint.config.mjs`, `package.json`) are
-   secret-independent. **Recommend cherry-picking `8b891bf` onto a branch off
-   `main`** so it lands independently of the secrets gate. This turn hit the
-   consequence directly: `pnpm test:int:file` did not exist on a branch off main.
+1. ~~**`8b891bf` is stranded.**~~ RESOLVED before this branch merged: cherry-picked
+   onto `main` as `23c0a92`, so the ESLint DB-clock rule and `test:int:file` now
+   reach `main` independently of the secrets gate. `chore/ci-integration-gate`
+   remains correctly blocked, and note its CI trigger is `on: [push, pull_request]`
+   — so *pushing* that branch (not only merging it) runs its integration job and
+   goes red until `TEST_DATABASE_URL` / `TEST_DATABASE_URL_AUTHENTICATED` exist.
 2. **Concern 4 — `CHECK (scope in (...))` on `client_consents.scope`.** Still
    recommended, still a schema decision. It would make `assertScope`
    defense-in-depth rather than the sole guard — the same pairing shape as the
