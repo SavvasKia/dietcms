@@ -670,9 +670,20 @@ git commit -m "feat: append-only audit_log + audit on client mutations"
 - Produces:
   - `clientConsents` table: `id, tenantId, clientId, scope, grantedAt, withdrawnAt, textVersion`.
   - `type ConsentScope = 'email_comms' | 'marketing' | 'third_party_sharing' | 'portal_access'`
-  - `grantConsent(userId, clientId, scope: ConsentScope, textVersion: string): Promise<typeof clientConsents.$inferSelect>`
-  - `withdrawConsent(userId, clientId, scope: ConsentScope): Promise<boolean>` (sets `withdrawnAt` on the latest active row for that scope)
-  - `activeConsents(userId, clientId): Promise<ConsentScope[]>` (scopes whose latest row has `withdrawnAt is null`)
+  - `grantConsent(userId, clientId, scope: ConsentScope, textVersion: string): Promise<typeof clientConsents.$inferSelect | null>`
+    — AS BUILT: `null` when the client is unreachable for the caller (a throw
+    would roll back the `deny` audit row). Re-granting an already-active scope
+    SUPERSEDES it (withdraw + insert, one tx), and the client row is taken
+    `FOR UPDATE` so two concurrent grants serialise.
+  - `withdrawConsent(userId, clientId, scope: ConsentScope): Promise<boolean>`
+    — AS BUILT: sets `withdrawnAt` on EVERY active row for that scope, not just
+    the latest; `false` when nothing changed. A partial unique index
+    (`client_consents_one_active_per_scope`) makes two active rows impossible, so
+    this is the recovery path for out-of-band data.
+  - `activeConsents(userId, clientId): Promise<ConsentScope[]>`
+    — AS BUILT: ONE query, no ORDER BY — the distinct scopes having a row with
+    `withdrawn_at is null`. Equivalent to "latest row is active" once withdrawal
+    is total, and immune to a `granted_at` tie.
 
 - [ ] **Step 1: Write the failing integration test**
 
