@@ -1,6 +1,7 @@
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import { authedDb, withUser } from '@/db/authed-client'
 import { clients, tenantMembers } from '@/db/schema'
+import { recordAudit } from '@/lib/audit'
 
 export type NewClient = {
   firstName: string
@@ -86,6 +87,16 @@ export function createClient(userId: string, input: NewClient): Promise<Client> 
         tenantId,
       })
       .returning()
+    // Same tx as the insert: if the audit write fails the client insert rolls
+    // back, so no client can be created unaudited. tenantId is passed through
+    // to save a second identical membership round trip.
+    await recordAudit(tx, {
+      action: 'create',
+      entity: 'client',
+      entityId: row.id,
+      clientId: row.id,
+      tenantId,
+    })
     return row
   })
 }
@@ -97,12 +108,37 @@ export function getClient(userId: string, clientId: string): Promise<Client | nu
       .from(clients)
       .where(and(eq(clients.id, clientId), isNull(clients.deletedAt)))
       .limit(1)
+    // Only audit a read that actually returned a record. A miss (unknown id or
+    // another tenant's client, filtered out by RLS) leaves no trace — see the
+    // note in the Task 3 report about logging denied attempts.
+    if (row) {
+      await recordAudit(tx, {
+        action: 'view',
+        entity: 'client',
+        entityId: row.id,
+        clientId: row.id,
+      })
+    }
     return row ?? null
   })
 }
 
 export function listClients(userId: string): Promise<Client[]> {
-  return withUser(userId, (tx) => tx.select().from(clients).where(isNull(clients.deletedAt)))
+  return withUser(userId, async (tx) => {
+    const rows = await tx.select().from(clients).where(isNull(clients.deletedAt))
+    // Spec §5: a list view is ONE audit row with entity_id (and client_id) null,
+    // not one per row. Unconditional — unlike the read-one paths there is no
+    // "nothing found" case to skip, so a membership-less caller now fails closed
+    // here instead of getting an unaudited empty list.
+    await recordAudit(tx, {
+      action: 'view',
+      entity: 'client',
+      entityId: null,
+      clientId: null,
+      metadata: { count: rows.length },
+    })
+    return rows
+  })
 }
 
 export function updateClient(
@@ -116,6 +152,14 @@ export function updateClient(
       .set({ ...pickClientFields(patch), updatedAt: dbNow })
       .where(and(eq(clients.id, clientId), isNull(clients.deletedAt)))
       .returning()
+    if (row) {
+      await recordAudit(tx, {
+        action: 'update',
+        entity: 'client',
+        entityId: row.id,
+        clientId: row.id,
+      })
+    }
     return row ?? null
   })
 }
@@ -129,6 +173,16 @@ export function softDeleteClient(userId: string, clientId: string): Promise<bool
       .set({ deletedAt: dbNow, updatedAt: dbNow })
       .where(and(eq(clients.id, clientId), isNull(clients.deletedAt)))
       .returning({ id: clients.id })
+    // Guarded on a row having changed: a second call matches nothing, so it must
+    // not append a second delete row.
+    if (rows.length > 0) {
+      await recordAudit(tx, {
+        action: 'delete',
+        entity: 'client',
+        entityId: rows[0].id,
+        clientId: rows[0].id,
+      })
+    }
     return rows.length > 0
   })
 }

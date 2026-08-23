@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, date, primaryKey, unique } from 'drizzle-orm/pg-core'
+import { pgTable, uuid, text, timestamp, date, jsonb, primaryKey, unique } from 'drizzle-orm/pg-core'
 import { pgPolicy } from 'drizzle-orm/pg-core'
 import { sql } from 'drizzle-orm'
 
@@ -84,6 +84,38 @@ export const clients = pgTable(
   },
   (t) => [
     pgPolicy('clients_tenant_isolation', {
+      for: 'all',
+      to: 'authenticated_backend',
+      using: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,
+      withCheck: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,
+    }),
+  ],
+).enableRLS()
+
+// Append-only audit trail. `authenticated_backend` keeps only INSERT + SELECT
+// (the migration REVOKEs the UPDATE/DELETE that ALTER DEFAULT PRIVILEGES hands
+// out), so the request path physically cannot rewrite history; Task 5's erasure
+// anonymizes through the owner path instead.
+//
+// `client_id` is a deliberate addition to spec §4: erasure has to find the audit
+// rows referencing an erased client, and the GDPR coverage tripwire keys off
+// client-scoped columns. No FK on purpose — ON DELETE CASCADE would *delete*
+// audit rows on erasure (spec says anonymize) and RESTRICT would block erasure.
+export const auditLog = pgTable(
+  'audit_log',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    actorUserId: text('actor_user_id').notNull(),
+    action: text('action').notNull(),
+    entity: text('entity').notNull(),
+    entityId: uuid('entity_id'),
+    clientId: uuid('client_id'),
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+    metadata: jsonb('metadata'),
+  },
+  (t) => [
+    pgPolicy('audit_log_tenant_isolation', {
       for: 'all',
       to: 'authenticated_backend',
       using: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,

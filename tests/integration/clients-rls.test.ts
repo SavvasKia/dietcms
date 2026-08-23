@@ -2,7 +2,7 @@
 import { describe, it, expect, afterAll, beforeAll } from 'vitest'
 import { db } from '../../db/client'
 import { withUser } from '../../db/authed-client'
-import { tenants, tenantMembers, clients } from '../../db/schema'
+import { tenants, tenantMembers, clients, auditLog } from '../../db/schema'
 import { eq, or } from 'drizzle-orm'
 import {
   createClient,
@@ -11,23 +11,7 @@ import {
   updateClient,
   softDeleteClient,
 } from '../../lib/clients'
-
-/** Drizzle wraps pg errors ("Failed query: …") and puts the real one in `.cause`.
- *  Flatten the chain so an assertion can match the actual Postgres message. */
-async function errorChain(fn: () => Promise<unknown>): Promise<string> {
-  const err = await fn().then(
-    () => null,
-    (e: unknown) => e,
-  )
-  expect(err, 'expected the query to reject').toBeTruthy()
-  const messages: string[] = []
-  let cur: unknown = err
-  while (cur instanceof Error) {
-    messages.push(cur.message)
-    cur = cur.cause
-  }
-  return messages.join(' | ')
-}
+import { errorChain } from '../helpers/error-chain'
 
 const run = Date.now().toString(36)
 const userA = `cli-a-${run}`
@@ -113,6 +97,12 @@ describe('client-service', () => {
 
   afterAll(async () => {
     // Owner role (BYPASSRLS) — also reaps the soft-deleted rows, which are still physically present.
+    // audit_log first: the service now writes a row per operation, audit_log.tenant_id
+    // has no FK (deliberate — see db/schema.ts), and the request role has no DELETE
+    // grant, so only this owner path can ever reap them.
+    await db
+      .delete(auditLog)
+      .where(or(eq(auditLog.tenantId, tenantIdS), eq(auditLog.tenantId, tenantIdOther)))
     await db
       .delete(clients)
       .where(or(eq(clients.tenantId, tenantIdS), eq(clients.tenantId, tenantIdOther)))
