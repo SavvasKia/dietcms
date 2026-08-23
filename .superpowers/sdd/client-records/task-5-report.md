@@ -1,6 +1,6 @@
 # Task 5 report: GDPR export + erasure
 
-Branch `feat/client-records`. Feature commit `764ff2e` — `feat: GDPR export + erasure service`.
+Branch `feat/client-records`. Feature commit `bd38921` — `feat: GDPR export + erasure service`.
 
 ## Files
 
@@ -124,6 +124,17 @@ AssertionError: expected [] to have a length of 3 but got +0
 The sibling client's three audit rows lost their `client_id` — the within-tenant
 half of the blast radius.
 
+### F6 — bonus: drop `metadata` from the export audit row
+
+Not required by the brief; the counts field was invented here, so the assertion
+on it was proved the same way.
+
+```
+     × writes an export audit row referencing the client 1404ms
+AssertionError: expected null to deeply equal { consents: 2, auditRows: Any<Number> }
+      Tests  1 failed | 17 passed (18)
+```
+
 ### F4 — requirement 5: run step 1's reachability check on the OWNER connection
 
 ```
@@ -232,7 +243,11 @@ after the commit, i.e. straight back to the plan's broken order.
    the accepted trade — the alternative is an unbounded blast radius on a
    BYPASSRLS connection — and it is the same hazard `recordDeny`'s comment
    already anticipated when it decided not to record attempted ids. Residual
-   risk is low: a bare uuid, with no name, email or clinical field attached. It
+   risk is low: a bare uuid, with no name, email or clinical field attached, and
+   `audit_log` is the **only** table that can survive this way — structurally so,
+   because it is the only `client_id` column with no FK. A foreign-tenant
+   `client_consents` row referencing the erased client would be removed by the
+   FK's `ON DELETE CASCADE` when `clients` goes, and cascades run below RLS. It
    is *not* fully closed, and this is the sharpest argument for the sweep in
    "Raise, do not implement" below.
 2. **What an export cannot include, by construction.** List-view rows
@@ -296,15 +311,19 @@ forgotten". Do not let a retained table default into the `anonymize` bucket.
   after step 2, leaves the client present, so this half correctly leaves it
   alone; it only cleans up rows whose client is genuinely gone. Low risk, small,
   and the natural home is a scheduled job on the owner connection.
-- **Half 2, cross-tenant (closes concern #1).** The surviving foreign-tenant row
-  from F3 is *not* reachable by half 1 — within tenant B, `client_id` matches no
-  `clients` row in tenant B, so half 1 would actually catch it, but only if the
-  sweep's "no matching client" test is scoped per tenant rather than globally.
-  Getting this right needs care in exactly the opposite direction: a **globally**
-  scoped sweep (`client_id` matches no `clients` row in *any* tenant) would
-  *miss* it while the referenced client still exists. So the sweep must be
-  per-tenant scoped to be useful, and that is a decision worth making explicitly
-  rather than falling into.
+- **Half 1 also closes concern #1, and continuously.** A per-tenant sweep catches
+  the F3 foreign row too — a tenant-B row pointing at a tenant-A client never had
+  a matching `clients` row in tenant B, so it is orphaned from the moment it is
+  written, not only after the erasure. That makes the per-tenant sweep a standing
+  scrubber of cross-tenant client identifiers as well as a retry-window closer;
+  it is the stronger of the two reasons to build it.
+- **Half 2 is the scoping decision, not a second job.** A **globally** scoped
+  sweep (`client_id` matches no `clients` row in *any* tenant) catches the
+  retry-window orphans and eventually the foreign row — but only *after* the
+  referenced client has been erased; it misses a live cross-tenant reference
+  entirely. Per-tenant scoping is therefore strictly stronger, and it must be
+  chosen deliberately rather than fallen into: the two predicates look almost
+  identical and differ exactly on the case concern #1 is about.
 - **Do not** wire either into the request path. The value here is exactly that
   it runs on a schedule, on the owner connection, with no user waiting — and its
   own test can then assert the invariant directly ("no `audit_log` row references
