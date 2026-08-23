@@ -740,3 +740,102 @@ describe('client_consents tenant isolation (req 7)', () => {
     expect(rows.map((r) => r.id)).toContain(consentIdA)
   })
 })
+
+// ---------------------------------------------------------------------------
+// 8. Concurrent grants of the same scope (Task 4 report, concern 5).
+//
+//    grantConsent's supersede step is withdraw-then-insert. Under READ COMMITTED
+//    two grants racing on one (client_id, scope) can both see zero active rows,
+//    both insert, and the loser trips client_consents_one_active_per_scope —
+//    rolling its whole transaction back and surfacing as a 500 to a caller who
+//    merely double-clicked. Nothing is corrupted; the request just fails for a
+//    reason the user cannot act on. A measured probe confirms withUser
+//    transactions run on distinct backends and genuinely overlap, so this is a
+//    real interleaving, not a theoretical one.
+//
+//    Fix: resolve the client with SELECT … FOR UPDATE, serialising the critical
+//    section per client. The FK's own FOR KEY SHARE lock does NOT do this — two
+//    KEY SHARE holders are compatible with each other.
+//
+//    Racing two real grants is not a usable gate (whether they collide depends on
+//    round-trip interleaving, so it passes most of the time either way). These
+//    tests assert the LOCK, using a competing FOR NO KEY UPDATE holder —
+//    deliberately chosen because it conflicts with FOR UPDATE but is compatible
+//    with the FOR KEY SHARE that the consent INSERT takes on the parent row. A
+//    FOR UPDATE holder would block the INSERT too, and the test would pass with
+//    the fix reverted.
+// ---------------------------------------------------------------------------
+describe('grantConsent serialises on the client row', () => {
+  const run = `${Date.now().toString(36)}-lock`
+  const userR = `con-lock-${run}`
+  let tenantIdR: string
+
+  beforeAll(async () => {
+    tenantIdR = await seed(`CON LOCK ${run}`, [userR])
+  })
+  afterAll(() => reap(tenantIdR, [userR]))
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+  /** Hold a FOR NO KEY UPDATE lock on one client row for `ms`, on the OWNER
+   *  connection (BYPASSRLS, so RLS cannot be why anything blocks or does not). */
+  function holdClientLock(clientId: string, ms: number): Promise<void> {
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`select id from clients where id = ${clientId} for no key update`)
+      await sleep(ms)
+    })
+  }
+
+  function settleFlag() {
+    const state = { settled: false }
+    const mark = <T,>(p: Promise<T>) =>
+      p.then(
+        (v) => {
+          state.settled = true
+          return v
+        },
+        (e) => {
+          state.settled = true
+          throw e
+        },
+      )
+    return { state, mark }
+  }
+
+  it('waits for a competing lock on the client row instead of racing', async () => {
+    const c = await createClient(userR, { firstName: 'Lock', lastName: 'L' })
+
+    const held = holdClientLock(c.id, 1200)
+    await sleep(150) // let the lock actually be taken
+
+    const { state, mark } = settleFlag()
+    const grant = mark(grantConsent(userR, c.id, 'email_comms', 'v1-el'))
+
+    await sleep(500)
+    expect(
+      state.settled,
+      'grantConsent finished while another transaction held the client row — the grant path takes no row lock, so two concurrent grants can race into a unique violation',
+    ).toBe(false)
+
+    await held
+    const row = await grant
+    expect(state.settled).toBe(true)
+    expect(row).not.toBeNull()
+    expect(await activeConsents(userR, c.id)).toEqual(['email_comms'])
+  })
+
+  it('the read path is NOT serialised by the lock', async () => {
+    // activeConsents must stay lock-free: locking in the shared client-resolution
+    // helper would stall every reader behind any in-flight grant.
+    const c = await createClient(userR, { firstName: 'Reader', lastName: 'R' })
+    await grantConsent(userR, c.id, 'marketing', 'v1-el')
+
+    const held = holdClientLock(c.id, 1200)
+    await sleep(150)
+    const t0 = Date.now()
+    expect(await activeConsents(userR, c.id)).toEqual(['marketing'])
+    const elapsed = Date.now() - t0
+    await held
+    expect(elapsed, 'activeConsents blocked on a client row lock').toBeLessThan(600)
+  })
+})
