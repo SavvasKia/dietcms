@@ -3,7 +3,16 @@ import type { authedDb } from '@/db/authed-client'
 import { auditLog, tenantMembers } from '@/db/schema'
 import { isDenied } from '@/lib/pii-denylist'
 
-export type AuditAction = 'view' | 'create' | 'update' | 'delete' | 'export' | 'erase'
+export type AuditAction =
+  | 'view'
+  | 'create'
+  | 'update'
+  | 'delete'
+  | 'export'
+  | 'erase'
+  /** A per-client access attempt that RLS refused. Carries no entity_id or
+   *  client_id — see recordDeny in lib/clients.ts for why. */
+  | 'deny'
 
 export type AuditArgs = {
   action: AuditAction

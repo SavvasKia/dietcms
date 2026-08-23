@@ -440,3 +440,91 @@ describe('a failed audit write rolls back the mutation', () => {
     expect(after.audits).toHaveLength(0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// 8. Denied access attempts (owner decision, 2026-08-23): the three per-client
+//    paths log a `deny` row on a miss, attributed to the CALLER's tenant and
+//    carrying NO attempted id — the probed uuid may belong to another tenant,
+//    and this tenant's log must not retain a foreign identifier that
+//    tenant-scoped erasure can never reach.
+// ---------------------------------------------------------------------------
+describe('denied access attempts are audited', () => {
+  const run = `${Date.now().toString(36)}-dny`
+  const userD = `aud-d-${run}`
+  const userV = `aud-v-${run}` // victim: owns the client that userD probes
+  // Deliberately given no tenant_members row.
+  const userNone = `aud-dn-${run}`
+  let tenantIdD: string
+  let tenantIdV: string
+  let victimClientId: string
+
+  beforeAll(async () => {
+    tenantIdD = await seed(`AUD DNY D ${run}`, [userD])
+    tenantIdV = await seed(`AUD DNY V ${run}`, [userV])
+    victimClientId = (await createClient(userV, { firstName: 'Victim', lastName: 'V' })).id
+  })
+  afterAll(async () => {
+    await reap(tenantIdD, [userD])
+    await reap(tenantIdV, [userV])
+  })
+
+  function denies(): Promise<AuditRow[]> {
+    return withUser(userD, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, 'deny')))
+  }
+
+  it('a cross-tenant getClient probe writes a deny row with no target id', async () => {
+    expect(await denies()).toHaveLength(0)
+
+    expect(await getClient(userD, victimClientId)).toBeNull()
+
+    const rows = await denies()
+    expect(rows).toHaveLength(1)
+    expect(rows[0].tenantId).toBe(tenantIdD) // the caller's tenant, not the victim's
+    expect(rows[0].actorUserId).toBe(userD)
+    expect(rows[0].entity).toBe('client')
+    // The whole point: the probed uuid is NOT retained.
+    expect(rows[0].entityId).toBeNull()
+    expect(rows[0].clientId).toBeNull()
+    expect(rows[0].metadata).toEqual({ outcome: 'denied' })
+  })
+
+  it('cross-tenant update and soft-delete probes each write a deny row', async () => {
+    const before = (await denies()).length
+
+    expect(await updateClient(userD, victimClientId, { goals: 'x' })).toBeNull()
+    expect(await softDeleteClient(userD, victimClientId)).toBe(false)
+
+    expect(await denies()).toHaveLength(before + 2)
+  })
+
+  it('the deny row is NOT visible to the probed tenant', async () => {
+    const victimRows = await withUser(userV, (tx) =>
+      tx.select().from(auditLog).where(eq(auditLog.action, 'deny')),
+    )
+    expect(victimRows).toHaveLength(0)
+  })
+
+  it("a probe does not disturb the victim's client", async () => {
+    const still = await getClient(userV, victimClientId)
+    expect(still?.id).toBe(victimClientId)
+    expect(still?.goals).toBeNull()
+    expect(still?.deletedAt).toBeNull()
+  })
+
+  it('an unknown uuid also counts as a denied attempt', async () => {
+    const before = (await denies()).length
+    expect(await getClient(userD, crypto.randomUUID())).toBeNull()
+    expect(await denies()).toHaveLength(before + 1)
+  })
+
+  it('a membership-less caller gets null, not an exception, and logs nothing', async () => {
+    // recordDeny cannot attribute a tenant here, so it must skip rather than
+    // throw — the same trap that made listClients regress in Task 3.
+    expect(await getClient(userNone, victimClientId)).toBeNull()
+    expect(await softDeleteClient(userNone, victimClientId)).toBe(false)
+
+    // Owner connection: userNone has no tenant, so it cannot read audit_log itself.
+    const rows = await db.select().from(auditLog).where(eq(auditLog.actorUserId, userNone))
+    expect(rows).toHaveLength(0)
+  })
+})

@@ -74,6 +74,38 @@ async function callerTenantId(tx: typeof authedDb): Promise<string> {
   return m.tenantId
 }
 
+/** Membership under RLS, or null when the caller has none. */
+async function callerTenantIdOrNull(tx: typeof authedDb): Promise<string | null> {
+  const [m] = await tx.select({ tenantId: tenantMembers.tenantId }).from(tenantMembers).limit(1)
+  return m?.tenantId ?? null
+}
+
+/**
+ * Logs a denied per-client access attempt, attributed to the CALLER's tenant.
+ *
+ * The attempted id is deliberately NOT recorded: it may belong to another tenant,
+ * and this tenant's audit log would then permanently hold a foreign client
+ * identifier that Task 5's tenant-scoped erasure can never reach. The trade is
+ * that we know a denied attempt happened and by whom, but not which record was
+ * probed (owner decision, 2026-08-23).
+ *
+ * A caller with no membership cannot be logged on the request path at all — the
+ * policy's WITH CHECK has no tenant to match — so that case is silently skipped
+ * rather than turned into an exception.
+ */
+async function recordDeny(tx: typeof authedDb): Promise<void> {
+  const tenantId = await callerTenantIdOrNull(tx)
+  if (!tenantId) return
+  await recordAudit(tx, {
+    action: 'deny',
+    entity: 'client',
+    entityId: null,
+    clientId: null,
+    metadata: { outcome: 'denied' },
+    tenantId,
+  })
+}
+
 export function createClient(userId: string, input: NewClient): Promise<Client> {
   return withUser(userId, async (tx) => {
     const tenantId = await callerTenantId(tx)
@@ -108,9 +140,6 @@ export function getClient(userId: string, clientId: string): Promise<Client | nu
       .from(clients)
       .where(and(eq(clients.id, clientId), isNull(clients.deletedAt)))
       .limit(1)
-    // Only audit a read that actually returned a record. A miss (unknown id or
-    // another tenant's client, filtered out by RLS) leaves no trace — see the
-    // note in the Task 3 report about logging denied attempts.
     if (row) {
       await recordAudit(tx, {
         action: 'view',
@@ -118,6 +147,10 @@ export function getClient(userId: string, clientId: string): Promise<Client | nu
         entityId: row.id,
         clientId: row.id,
       })
+    } else {
+      // A miss is indistinguishable from a cross-tenant probe: RLS filters both
+      // to the same empty result. Log it either way.
+      await recordDeny(tx)
     }
     return row ?? null
   })
@@ -128,11 +161,8 @@ export function listClients(userId: string): Promise<Client[]> {
     // No membership → RLS exposes no client rows, so no access happened and
     // there is nothing to log. Matches getClient/updateClient/softDeleteClient,
     // which likewise skip the audit row when nothing was reachable.
-    const [membership] = await tx
-      .select({ tenantId: tenantMembers.tenantId })
-      .from(tenantMembers)
-      .limit(1)
-    if (!membership) return []
+    const tenantId = await callerTenantIdOrNull(tx)
+    if (!tenantId) return []
 
     const rows = await tx.select().from(clients).where(isNull(clients.deletedAt))
     // Spec §5: a list view is ONE audit row with entity_id (and client_id) null,
@@ -143,7 +173,7 @@ export function listClients(userId: string): Promise<Client[]> {
       entityId: null,
       clientId: null,
       metadata: { count: rows.length },
-      tenantId: membership.tenantId,
+      tenantId,
     })
     return rows
   })
@@ -167,6 +197,8 @@ export function updateClient(
         entityId: row.id,
         clientId: row.id,
       })
+    } else {
+      await recordDeny(tx)
     }
     return row ?? null
   })
@@ -190,6 +222,8 @@ export function softDeleteClient(userId: string, clientId: string): Promise<bool
         entityId: rows[0].id,
         clientId: rows[0].id,
       })
+    } else {
+      await recordDeny(tx)
     }
     return rows.length > 0
   })
