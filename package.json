@@ -45,9 +45,5 @@
     "typescript": "^5",
     "vitest": "^4.1.9"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@sentry/cli"
-    ]
-  }
+  "packageManager": "pnpm@11.9.0"
 }
