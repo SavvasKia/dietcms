@@ -1,5 +1,12 @@
-import { auth } from '@/lib/auth/server'
+import { getSessionCookie } from 'better-auth/cookies'
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
 
-export default auth.middleware({ loginUrl: '/auth/sign-in' })
+export default function proxy(request: NextRequest) {
+  if (!getSessionCookie(request)) {
+    return NextResponse.redirect(new URL('/auth/sign-in', request.url))
+  }
+  return NextResponse.next()
+}
 
 export const config = { matcher: ['/dashboard/:path*'] }
