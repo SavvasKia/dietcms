@@ -63,4 +63,14 @@ describe('signInWithEmail', () => {
 
     expect(result).toEqual({ error: 'Αποτυχία σύνδεσης. Δοκιμάστε ξανά.' })
   })
+
+  it('re-throws an error that is not an APIError', async () => {
+    vi.mocked(auth.api.signInEmail).mockRejectedValue(new Error('unexpected'))
+
+    await expect(
+      signInWithEmail(null, formData({ email: 'a@b.gr', password: 'wrong' })),
+    ).rejects.toThrow('unexpected')
+
+    expect(redirect).not.toHaveBeenCalled()
+  })
 })

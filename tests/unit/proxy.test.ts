@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { NextRequest } from 'next/server'
 
 vi.mock('better-auth/cookies', () => ({ getSessionCookie: vi.fn() }))
@@ -7,6 +7,8 @@ import { getSessionCookie } from 'better-auth/cookies'
 import proxy from '../../proxy'
 
 describe('proxy', () => {
+  beforeEach(() => vi.clearAllMocks())
+
   it('redirects to /auth/sign-in when there is no session cookie', () => {
     vi.mocked(getSessionCookie).mockReturnValue(null)
     const request = new NextRequest('http://localhost:3000/dashboard')

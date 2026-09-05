@@ -66,4 +66,14 @@ describe('signUpWithEmail', () => {
     expect(result).toEqual({ error: 'User already exists' })
     expect(redirect).not.toHaveBeenCalled()
   })
+
+  it('re-throws an error that is not an APIError', async () => {
+    vi.mocked(auth.api.signUpEmail).mockRejectedValue(new Error('unexpected'))
+
+    await expect(
+      signUpWithEmail(null, formData({ name: 'A', email: 'a@b.gr', password: 'secret123' })),
+    ).rejects.toThrow('unexpected')
+
+    expect(redirect).not.toHaveBeenCalled()
+  })
 })
