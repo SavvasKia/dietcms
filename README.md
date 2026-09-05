@@ -22,8 +22,8 @@ The following environment variables are required. All services must use EU-regio
 |---|---|
 | `DATABASE_URL` | Neon connection string (unauthenticated / pooled) |
 | `DATABASE_URL_AUTHENTICATED` | Neon connection string for RLS-authenticated sessions |
-| `NEON_AUTH_BASE_URL` | Neon Auth API base URL (EU endpoint) |
-| `NEON_AUTH_COOKIE_SECRET` | Secret used to sign Neon Auth session cookies |
+| `BETTER_AUTH_SECRET` | Secret used to sign better-auth session cookies |
+| `BETTER_AUTH_URL` | Base URL better-auth uses for callbacks/redirects |
 | `NEXT_PUBLIC_SENTRY_DSN` | Sentry DSN — use an EU-region project |
 | `NEXT_PUBLIC_POSTHOG_KEY` | PostHog project API key |
 | `NEXT_PUBLIC_POSTHOG_HOST` | PostHog ingest host — must be `https://eu.i.posthog.com` |
