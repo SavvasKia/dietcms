@@ -14,3 +14,57 @@ jobs:
       - run: pnpm test
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+
+      # Throwaway Neon branch per run, forked from a dedicated "ci-base" branch
+      # (schema + roles/grants only, no real data) rather than production —
+      # deleted unconditionally below, even on failure. authenticated_backend
+      # must already exist on ci-base: migrations only GRANT/REVOKE against
+      # it, none of them CREATE it (that was done by hand in the foundation
+      # work — see .superpowers/sdd/foundation/task-5-pathB-brief.md).
+      - name: Create Neon branch (owner role)
+        id: neon_owner
+        uses: neondatabase/create-branch-action@v6
+        with:
+          project_id: ${{ vars.NEON_PROJECT_ID }}
+          api_key: ${{ secrets.NEON_API_KEY }}
+          parent_branch: ci-base
+          branch_name: ci-${{ github.run_id }}
+
+      # Second call, same branch_name — reuses the branch just created and
+      # only fetches a second role's connection string (documented, supported
+      # pattern; does not create a duplicate branch).
+      - name: Get authenticated_backend connection string
+        id: neon_authed
+        uses: neondatabase/create-branch-action@v6
+        with:
+          project_id: ${{ vars.NEON_PROJECT_ID }}
+          api_key: ${{ secrets.NEON_API_KEY }}
+          parent_branch: ci-base
+          branch_name: ci-${{ github.run_id }}
+          role: authenticated_backend
+
+      - run: pnpm db:migrate
+        env:
+          DATABASE_URL: ${{ steps.neon_owner.outputs.db_url }}
+
+      - run: pnpm test:int
+        env:
+          DATABASE_URL: ${{ steps.neon_owner.outputs.db_url }}
+          DATABASE_URL_AUTHENTICATED: ${{ steps.neon_authed.outputs.db_url }}
+
+      - name: Delete Neon branch
+        if: always()
+        uses: neondatabase/delete-branch-action@v3
+        with:
+          project_id: ${{ vars.NEON_PROJECT_ID }}
+          branch: ci-${{ github.run_id }}
+          api_key: ${{ secrets.NEON_API_KEY }}

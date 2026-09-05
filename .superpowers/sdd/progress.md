@@ -118,3 +118,37 @@ exists in plain better-auth). PENDING (user, not done here): run
 `pnpm db:migrate` against the real Neon dev DB (needs live DATABASE_URL, not
 available in the planning/implementation sandbox); set BETTER_AUTH_SECRET +
 BETTER_AUTH_URL in Vercel env for preview/production before next deploy.
+  POST-MERGE FIX (final whole-branch review caught it, not any per-task
+  review): migration 0006 was missing a REVOKE for authenticated_backend on
+  the four new tables. This repo's foundation set up ALTER DEFAULT
+  PRIVILEGES so that role gets CRUD on every NEW table automatically
+  (already worked around once for audit_log in migration 0004) — without
+  the same fix here, applying 0006 would have handed the tenant-scoped
+  request role unrestricted, un-RLS'd access to password hashes and
+  session tokens. Fixed before merge: REVOKE ALL appended to 0006, the
+  schema.ts comment corrected to explain why, and an integration test
+  added (tests/integration/auth-tables-privileges.test.ts) asserting zero
+  grants — mirrors audit-append-only.test.ts's grant-check pattern. NOT
+  yet verified against a live DB (same sandbox constraint as db:migrate
+  itself) — run `pnpm test:int` after applying 0006 to confirm.
+  Full detail (per-task ledger, rulings, fix-wave verification) preserved
+  under .superpowers/sdd/2026-09-05-better-auth-migration/ — tracked in
+  git, not deleted, matching this file's own convention.
+
+>>> CI-GATE FOLLOW-UP: the `chore/ci-integration-gate` branch referenced
+above never actually existed in this repo (checked git branch -a and git
+ls-remote against origin — only main). Built fresh instead of resumed, on
+branch ci/integration-test-gate: a new `integration` job in
+.github/workflows/ci.yml using Neon's official create-branch-action/
+delete-branch-action to fork a throwaway branch per run from a dedicated
+`ci-base` Neon branch (not production — schema/roles only, no real data),
+call the create action a second time with the same branch_name + role:
+authenticated_backend to get a second connection string (documented,
+idempotent-by-name pattern — does not create a duplicate branch), run
+pnpm db:migrate then pnpm test:int against the two URLs, and always
+delete the throwaway branch after. Requires the user to: (1) create
+`ci-base` in the Neon console (fork from dev — it already has
+authenticated_backend and its grants, which no migration in this repo
+creates from scratch), (2) create a Neon API key, (3) add repo secret
+NEON_API_KEY + repo variable NEON_PROJECT_ID. Will not go green until
+those three steps are done — cannot be verified from this sandbox.
