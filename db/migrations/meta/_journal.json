@@ -43,6 +43,13 @@
       "when": 1787498838289,
       "tag": "0005_glossy_mister_fear",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788603667486,
+      "tag": "0006_futuristic_arclight",
+      "breakpoints": true
     }
   ]
 }
