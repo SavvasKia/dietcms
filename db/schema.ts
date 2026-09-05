@@ -18,7 +18,12 @@ import { sql } from 'drizzle-orm'
 // (db/client.ts), never through the tenant-scoped authedDb/withUser path,
 // and a tenant relationship doesn't exist yet when these are first touched
 // (ensureTenantForUser bootstraps it afterward). authenticated_backend gets
-// no grants on these tables at all.
+// no grants on these tables — but NOT automatically: the foundation's
+// ALTER DEFAULT PRIVILEGES hands authenticated_backend CRUD on every new
+// table, so migration 0006 explicitly REVOKEs it here (same pattern as
+// audit_log's REVOKE UPDATE, DELETE in migration 0004), or a request-path
+// connection would have unrestricted access to password hashes and
+// session tokens with no RLS to filter it.
 export const users = pgTable('users', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
