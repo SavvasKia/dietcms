@@ -102,3 +102,19 @@ POST-MERGE FOLLOW-UPS (Task 4 concern triage, arrived after the module merged):
   3. `ERR_PNPM_IGNORED_BUILDS` for sharp and unrs-resolver — native binaries pnpm 11 refuses to build unless declared. Invisible locally, where an existing node_modules already had them approved. Added to `allowBuilds`.
   FIRST GREEN RUN: 32672462930, 1m15s, every step verified as `success` — install, typecheck, lint, `pnpm test` (26), playwright install, `pnpm test:e2e`. The local four gates and CI now agree for the first time.
   CONSEQUENCE FOR THE CI-GATE DECISION: `chore/ci-integration-gate` is still correctly blocked on the Neon secrets, but note its trigger is `on: [push, pull_request]` — PUSHING that branch (not only merging it) will run the integration job and go red until TEST_DATABASE_URL / TEST_DATABASE_URL_AUTHENTICATED exist. It also needs rebasing onto these three CI fixes, or it will fail at pnpm setup exactly as main did and the secrets assertion will never even be reached.
+
+=== better-auth migration (off @neondatabase/auth 0.4.2-beta) ===
+Complete. Replaced the Neon-managed auth wrapper with plain better-auth@1.7.2
++ @better-auth/drizzle-adapter@1.7.2. App now owns users/sessions/accounts/
+verifications directly (migration 0006) — plain tables, no RLS, no grants to
+authenticated_backend, owner-pool only (db/client.ts). getCurrentUser's
+{id,email}|null contract unchanged; ensureTenantForUser and the dashboard
+needed zero edits. Sign-in/up actions moved from the wrapper's {error} return
+shape to better-auth's real auth.api.signInEmail/signUpEmail, which throw
+APIError instead — both now try/catch around the call with redirect() kept
+outside the catch. proxy.ts simplified to better-auth's documented Next-16
+pattern (getSessionCookie optimistic check; no auth.middleware() equivalent
+exists in plain better-auth). PENDING (user, not done here): run
+`pnpm db:migrate` against the real Neon dev DB (needs live DATABASE_URL, not
+available in the planning/implementation sandbox); set BETTER_AUTH_SECRET +
+BETTER_AUTH_URL in Vercel env for preview/production before next deploy.
