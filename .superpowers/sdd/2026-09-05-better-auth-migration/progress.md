@@ -136,6 +136,34 @@ because no task's brief asked about it:
   missing `name` (needs a product decision on validation + Greek
   message, not mine to make unilaterally); Minor — verifications
   table's nullable timestamps (matches plan text verbatim, harmless).
+
+FIX WAVE (commits 6ada23a..64f3b0b): all 4 findings fixed in one dispatch
+  (59b1a8f security revoke, 00bd52b gitignore+workspace-tracking restore,
+  ddd94db test coverage, 64f3b0b fix-report itself tracked).
+SCOPED RE-REVIEW: all 4 findings ADDRESSED, no new Critical/Important
+  breakage. One out-of-scope observation: .superpowers/sdd/.gitignore
+  kept reverting to `*` in the WORKING TREE (not the commits) every time
+  `review-package`/`task-brief` ran, because both scripts call
+  `sdd-workspace`, which unconditionally rewrites that file as a
+  side effect on every invocation — a tooling behavior, not a defect in
+  the fix. Restored one final time after the last review-package call
+  (no more such calls remain for this plan) and verified clean against
+  the committed state.
+  Ruling: per my earlier ruling (Task 8), this plan's SDD workspace is
+  tracked permanently, matching foundation/ and client-records/
+  precedent — do NOT run the skill's default `rm -rf` at Finish.
+
+BRANCH READY TO MERGE. All 8 tasks + 1 post-hoc fix wave complete and
+reviewed clean. Handoff to user: (1) run `pnpm db:migrate` against the
+real Neon dev DB to apply migration 0006 (now includes the REVOKE), then
+`pnpm test:int` to confirm the new grants test passes live; (2) set
+BETTER_AUTH_SECRET (high-entropy, 32+ chars) + BETTER_AUTH_URL in Vercel
+env for preview/production BEFORE the next deploy — confirmed this is a
+hard crash on every auth route without it, not a soft warning; (3)
+manual smoke test once (2) is done: sign up -> land on /dashboard with a
+tenant id -> clear session cookie -> confirm /dashboard bounces to
+/auth/sign-in — no automated test exercises the real better-auth wiring
+end-to-end (e2e/smoke.spec.ts only hits '/').
   Ruling: implementer's `git add` swept in two pre-existing untracked
   session-local files (.mcp.json, .serena/) plus this session's own
   `sdd-workspace` script side-effect (.superpowers/sdd/.gitignore: `*.diff`
