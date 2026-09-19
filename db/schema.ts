@@ -12,9 +12,7 @@ import {
 } from 'drizzle-orm/pg-core'
 import { check, index, pgPolicy } from 'drizzle-orm/pg-core'
 import { sql } from 'drizzle-orm'
-// Explicit `.ts` extension: db/schema.ts is loaded by plain `node` in
-// scripts/check-gdpr-coverage.mts, whose ESM resolver does no extension guessing.
-import { CONSENT_SCOPES } from './consent-scopes.ts'
+import { CONSENT_SCOPES } from './consent-scopes'
 
 // better-auth owns this schema directly (app-owned, not Neon-managed). Plain
 // tables, no RLS: better-auth reads/writes them through the owner pool

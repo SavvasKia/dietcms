@@ -19,34 +19,34 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e
 
-  # Whether the integration job can run at all. `secrets` is not available in a
-  # job-level `if:`, so the presence check has to happen inside a job and be
-  # published as an output. Deliberately a WARNING annotation rather than a
-  # silent skip: an unconfigured repo would otherwise show all-green CI while
-  # every RLS, audit-grant and GDPR-erasure proof went unrun, which is the exact
-  # failure this gate was built to end (see .superpowers/sdd/progress.md).
-  integration-preflight:
+  integration:
     runs-on: ubuntu-latest
-    outputs:
-      ready: ${{ steps.check.outputs.ready }}
     steps:
-      - id: check
+      # FAILS the run when the Neon credentials are missing — it does not warn
+      # and skip. Skipping would mean an unconfigured repo shows all-green CI
+      # while every RLS, audit-grant and GDPR-erasure proof goes unrun, which is
+      # precisely the failure .superpowers/sdd/progress.md recorded ("CI HAD
+      # NEVER RUN AT ALL") and said not to let default silently. An incomplete
+      # CI setup is a blocking incompleteness, not a steady state to route
+      # around; make this optional only as an explicit, recorded policy call.
+      #
+      # A step rather than a preflight job on purpose: `secrets` is not readable
+      # from a job-level `if:` (only github/needs/vars/inputs are), and a whole
+      # runner billed at 1-minute granularity just to test two variables would
+      # sit on the critical path of every push.
+      - name: Verify Neon credentials are configured
         env:
           NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
           NEON_PROJECT_ID: ${{ vars.NEON_PROJECT_ID }}
         run: |
-          if [ -n "$NEON_API_KEY" ] && [ -n "$NEON_PROJECT_ID" ]; then
-            echo 'ready=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'ready=false' >> "$GITHUB_OUTPUT"
-            echo "::warning title=Integration tests did not run::pnpm test:int is SKIPPED because the Neon credentials are missing. Every tenant-isolation, audit-append-only and GDPR-erasure proof is unverified on this run. To enable: create a 'ci-base' Neon branch (fork from dev — it already carries the authenticated_backend role and its grants, which no migration creates), then add secret NEON_API_KEY and variable NEON_PROJECT_ID."
+          missing=''
+          [ -n "$NEON_API_KEY" ] || missing="$missing secret:NEON_API_KEY"
+          [ -n "$NEON_PROJECT_ID" ] || missing="$missing var:NEON_PROJECT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error title=Integration tests cannot run::Missing:$missing — so every tenant-isolation, audit-append-only and GDPR-erasure proof is unverified. To configure: (1) create a 'ci-base' branch in the Neon console, forked from dev because it already carries the authenticated_backend role and its grants, which no migration in this repo creates from scratch; (2) create a Neon API key; (3) add repo secret NEON_API_KEY and repo variable NEON_PROJECT_ID."
+            exit 1
           fi
 
-  integration:
-    needs: integration-preflight
-    if: needs.integration-preflight.outputs.ready == 'true'
-    runs-on: ubuntu-latest
-    steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4

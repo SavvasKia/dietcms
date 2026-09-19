@@ -13,7 +13,7 @@
     "test:e2e": "playwright test",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "check:gdpr": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-gdpr-coverage.mts",
+    "check:gdpr": "tsx scripts/check-gdpr-coverage.ts",
     "test:int": "vitest run --config vitest.integration.config.ts",
     "test:int:file": "vitest run --config vitest.integration.config.ts"
   },
@@ -44,6 +44,7 @@
     "eslint-config-next": "16.2.9",
     "jsdom": "^29.1.1",
     "tailwindcss": "^4",
+    "tsx": "^4.23.13",
     "typescript": "^5",
     "vitest": "^4.1.9"
   },

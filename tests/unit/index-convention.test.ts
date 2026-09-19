@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getTableConfig } from 'drizzle-orm/pg-core'
+import { allTables, type TableConfig } from '@/db/introspect'
 import * as schema from '@/db/schema'
 
 /**
@@ -29,8 +29,8 @@ import * as schema from '@/db/schema'
 
 type Cover = { cols: string[]; partial: boolean }
 
-/** Every non-partial structure that can serve as an index, leading columns first. */
-function covers(cfg: ReturnType<typeof getTableConfig>): Cover[] {
+/** Every structure that can serve as an index, leading columns first. */
+function covers(cfg: TableConfig): Cover[] {
   return [
     ...cfg.indexes.map((i) => ({
       cols: i.config.columns.map((c) => (c as { name?: string }).name ?? ''),
@@ -41,19 +41,17 @@ function covers(cfg: ReturnType<typeof getTableConfig>): Cover[] {
   ]
 }
 
-/** A btree index serves a predicate on `wanted` only if they are its LEADING columns. */
-const isCoveredBy = (c: Cover, wanted: string[]) =>
-  !c.partial && wanted.every((col, i) => c.cols[i] === col)
+/**
+ * A btree index serves a predicate on `wanted` only if they are its LEADING
+ * columns. `allowPartial` is the difference between the two rules: rule 1 must
+ * reject a partial index (a cascade has to find every child row, including the
+ * ones the predicate excludes), rule 2 accepts one because it is matching a
+ * specific query — and the clients index is deliberately partial.
+ */
+const isCoveredBy = (c: Cover, wanted: string[], allowPartial = false) =>
+  (allowPartial || !c.partial) && wanted.every((col, i) => c.cols[i] === col)
 
-const tables = Object.values(schema)
-  .map((v) => {
-    try {
-      return getTableConfig(v as never)
-    } catch {
-      return null // not a drizzle table
-    }
-  })
-  .filter((c): c is NonNullable<typeof c> => c !== null)
+const tables = allTables(schema)
 
 describe('index convention', () => {
   it('discovers the schema tables (guards a vacuous pass below)', () => {
@@ -65,9 +63,10 @@ describe('index convention', () => {
   it('rule 1: every foreign key referencing column has a non-partial index', () => {
     const uncovered: string[] = []
     for (const cfg of tables) {
+      const available = covers(cfg)
       for (const fk of cfg.foreignKeys) {
         const cols = fk.reference().columns.map((c) => c.name)
-        if (!covers(cfg).some((c) => isCoveredBy(c, cols))) {
+        if (!available.some((c) => isCoveredBy(c, cols))) {
           uncovered.push(`${cfg.name}(${cols.join(', ')})`)
         }
       }
@@ -100,16 +99,6 @@ describe('index convention', () => {
   it.each(queryDriven)('rule 2: $table($cols) is indexed — $why', ({ table, cols }) => {
     const cfg = tables.find((t) => t.name === table)
     expect(cfg, `table ${table} not found in db/schema.ts`).toBeDefined()
-    // Partial IS allowed here: these serve specific queries, not cascades, and the
-    // clients one is deliberately partial on `deleted_at is null`.
-    const all = covers(cfg!).concat(
-      cfg!.indexes
-        .filter((i) => i.config.where !== undefined)
-        .map((i) => ({
-          cols: i.config.columns.map((c) => (c as { name?: string }).name ?? ''),
-          partial: false,
-        })),
-    )
-    expect(all.some((c) => isCoveredBy(c, cols))).toBe(true)
+    expect(covers(cfg!).some((c) => isCoveredBy(c, cols, true))).toBe(true)
   })
 })

@@ -10,10 +10,6 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
-    // scripts/check-gdpr-coverage.mts is run by plain `node`, whose ESM resolver
-    // does no extension guessing, so its import of db/schema must spell `.ts`.
-    // Safe here because the project is noEmit — nothing is rewritten on the way out.
-    "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,
@@ -34,5 +30,9 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules"]
+  // scripts/ has its own config: it is run by plain `node`, whose ESM resolver
+  // does no extension guessing, so it needs allowImportingTsExtensions to spell
+  // `../db/schema.ts`. Kept out of the app config so that permission does not
+  // apply to app code, whose bundler resolution for that pattern is untested.
+  "exclude": ["node_modules", "scripts"]
 }

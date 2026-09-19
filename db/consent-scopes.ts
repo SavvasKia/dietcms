@@ -5,7 +5,7 @@
  * It lives in `db/` rather than `lib/` because `db/schema.ts` must import it and
  * `lib/consents.ts` imports `db/authed-client`; defining it in `lib/` would make
  * that a cycle. This module is a LEAF on purpose — no imports at all — so
- * `db/schema.ts` stays loadable by plain `node` (scripts/check-gdpr-coverage.mts
+ * `db/schema.ts` stays loadable by plain `node` (scripts/check-gdpr-coverage.ts
  * imports it without a bundler or path aliases).
  *
  * RETIRING A SCOPE IS A MIGRATION, not an edit here. Dropping a member from the

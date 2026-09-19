@@ -37,11 +37,4 @@ describe('client_consents scope CHECK', () => {
     expect(literals).toEqual([...CONSENT_SCOPES].sort())
   })
 
-  it('is built from CONSENT_SCOPES rather than a hand-copied list', () => {
-    // Guards the drift the constraint exists to prevent: if the two lists were
-    // written out separately, adding a scope in one place would leave the other
-    // stale and this assertion would be the only thing that noticed.
-    const sql = checkSql()
-    for (const scope of CONSENT_SCOPES) expect(sql).toContain(`'${scope}'`)
-  })
 })
