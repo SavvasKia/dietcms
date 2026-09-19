@@ -3,29 +3,23 @@ import { authedDb, withUser } from '@/db/authed-client'
 import { clientConsents, clients, tenantMembers } from '@/db/schema'
 import { recordAudit } from '@/lib/audit'
 
-export type ConsentScope = 'email_comms' | 'marketing' | 'third_party_sharing' | 'portal_access'
-
-/** The closed set of scopes, and the order `activeConsents` returns them in. */
-export const CONSENT_SCOPES = [
-  'email_comms',
-  'marketing',
-  'third_party_sharing',
-  'portal_access',
-] as const satisfies readonly ConsentScope[]
-
-// The other direction: adding a member to ConsentScope without listing it above
-// makes this alias resolve to `false`, which fails the `extends true` bound.
-type Assert<T extends true> = T
-export type ConsentScopesAreComplete = Assert<
-  Exclude<ConsentScope, (typeof CONSENT_SCOPES)[number]> extends never ? true : false
->
+// Defined in db/ so db/schema.ts can build the CHECK from the same list without
+// importing this module (which would be a cycle via db/authed-client).
+// Re-exported because this has always been the import site for callers; imported
+// as well because `export … from` creates no local binding and the body uses both.
+import { CONSENT_SCOPES, type ConsentScope } from '@/db/consent-scopes'
+export { CONSENT_SCOPES, type ConsentScope, type ConsentScopesAreComplete } from '@/db/consent-scopes'
 
 /**
- * `scope` is `text` in the DB with no CHECK constraint, and it arrives here as a
- * parameter — a value out of `JSON.parse` in a route handler or server action has
- * bypassed the TypeScript union entirely. Reject it before touching the DB, or
- * the table accumulates scopes nothing can read back (same defect class as Task
- * 2's mass assignment, guarded the same way).
+ * `scope` arrives here as a parameter — a value out of `JSON.parse` in a route
+ * handler or server action has bypassed the TypeScript union entirely. Reject it
+ * before touching the DB (same defect class as Task 2's mass assignment, guarded
+ * the same way).
+ *
+ * `client_consents_scope_known` now backstops this in the database, so a gap here
+ * is a 23514 rather than a silently unreadable row. Keep both: this one fails
+ * with a legible message and without opening a transaction, and it is the only
+ * guard on any future path that reaches the column outside this module.
  *
  * The two guarded entry points are `async` so this surfaces as a REJECTED
  * promise: a synchronous throw out of a Promise-returning function slips past a

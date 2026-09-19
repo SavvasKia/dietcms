@@ -50,6 +50,20 @@
       "when": 1788603667486,
       "tag": "0006_futuristic_arclight",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789848997929,
+      "tag": "0007_same_zeigeist",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789849242343,
+      "tag": "0008_good_alex_wilder",
+      "breakpoints": true
     }
   ]
 }

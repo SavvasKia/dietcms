@@ -568,6 +568,70 @@ describe('scope is validated at runtime (req 4)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 5b. The same rule one layer down. Everything above goes through
+//     lib/consents.ts, so it proves assertScope works — not that the column is
+//     constrained. These insert on the OWNER connection, bypassing assertScope
+//     AND RLS, so the only thing that can reject the row is the CHECK itself.
+//     Deleting assertScope must leave these green; dropping the constraint from
+//     db/schema.ts must turn them red. Migration: 0007.
+// ---------------------------------------------------------------------------
+describe('client_consents_scope_known rejects an out-of-band scope (DB level)', () => {
+  const run = `${Date.now().toString(36)}-chk`
+  const userC = `con-chk-${run}`
+  let tenantIdC: string
+
+  beforeAll(async () => {
+    tenantIdC = await seed(`CON CHK ${run}`, [userC])
+  })
+  afterAll(() => reap(tenantIdC, [userC]))
+
+  it('the constraint exists on the table', async () => {
+    const { rows } = await db.execute(sql`
+      select conname from pg_constraint
+      where conrelid = 'client_consents'::regclass and contype = 'c'`)
+    expect(
+      rows.map((r) => r.conname),
+      'migration 0007 has not been applied to this database',
+    ).toContain('client_consents_scope_known')
+  })
+
+  it('an unknown scope is refused even on the owner connection', async () => {
+    const c = await createClient(userC, { firstName: 'Check', lastName: 'C' })
+    const chain = await errorChain(() =>
+      db.insert(clientConsents).values({
+        tenantId: tenantIdC,
+        clientId: c.id,
+        scope: 'all_purposes',
+        textVersion: 'v1-el',
+      }),
+    )
+    // 23514 = check_violation. Asserting the constraint NAME as well, so an
+    // unrelated failure (a FK, a null) cannot be mistaken for this passing.
+    expect(chain).toMatch(/client_consents_scope_known|23514/)
+    expect(await rowsFor(c.id)).toHaveLength(0)
+  })
+
+  it('every declared scope survives the constraint on the owner connection', async () => {
+    // The other direction: a CHECK that rejected a legitimate scope would be a
+    // worse bug than the one it fixes, and no app-path test would catch it
+    // because assertScope would already have let the value through.
+    const c = await createClient(userC, { firstName: 'Check', lastName: 'V' })
+    for (const scope of CONSENT_SCOPES) {
+      await db.insert(clientConsents).values({
+        tenantId: tenantIdC,
+        clientId: c.id,
+        scope,
+        // Withdrawn on insert: the partial unique index allows unlimited
+        // withdrawn rows, so this loop cannot trip it on a repeated scope.
+        withdrawnAt: sql`now()`,
+        textVersion: 'v1-el',
+      })
+    }
+    expect(await rowsFor(c.id)).toHaveLength(CONSENT_SCOPES.length)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 6. Requirement 5 — the per-client read/withdraw paths log a `deny` row when
 //    the client is unreachable, carrying no attempted id (Task 3's owner
 //    decision), and a membership-less caller is skipped rather than thrown.

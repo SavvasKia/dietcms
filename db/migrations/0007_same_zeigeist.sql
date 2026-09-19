@@ -1,0 +1,1 @@
+ALTER TABLE "client_consents" ADD CONSTRAINT "client_consents_scope_known" CHECK (scope in ('email_comms', 'marketing', 'third_party_sharing', 'portal_access'));

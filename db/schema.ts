@@ -10,8 +10,11 @@ import {
   uniqueIndex,
   boolean,
 } from 'drizzle-orm/pg-core'
-import { pgPolicy } from 'drizzle-orm/pg-core'
+import { check, index, pgPolicy } from 'drizzle-orm/pg-core'
 import { sql } from 'drizzle-orm'
+// Explicit `.ts` extension: db/schema.ts is loaded by plain `node` in
+// scripts/check-gdpr-coverage.mts, whose ESM resolver does no extension guessing.
+import { CONSENT_SCOPES } from './consent-scopes.ts'
 
 // better-auth owns this schema directly (app-owned, not Neon-managed). Plain
 // tables, no RLS: better-auth reads/writes them through the owner pool
@@ -34,36 +37,53 @@ export const users = pgTable('users', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
-export const sessions = pgTable('sessions', {
-  id: text('id').primaryKey(),
-  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-  token: text('token').notNull().unique(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-  ipAddress: text('ip_address'),
-  userAgent: text('user_agent'),
-  userId: text('user_id')
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-})
+// INDEX CONVENTION (settled after being deferred through Tasks 1, 3 and 5; the
+// rules and their rationale are asserted in tests/unit/index-convention.test.ts):
+//   1. every FK referencing column gets a NON-PARTIAL index — Postgres indexes
+//      only the referenced side, so an un-indexed child seq-scans on every
+//      parent DELETE, and four tables here cascade;
+//   2. columns lib/ actually filters on get an index where the table is
+//      unbounded. Nothing speculative beyond those two.
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: text('id').primaryKey(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    token: text('token').notNull().unique(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+  },
+  // Rule 1. Also the lookup better-auth does on every session revocation.
+  (t) => [index('sessions_user_id_idx').on(t.userId)],
+)
 
-export const accounts = pgTable('accounts', {
-  id: text('id').primaryKey(),
-  accountId: text('account_id').notNull(),
-  providerId: text('provider_id').notNull(),
-  userId: text('user_id')
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  accessToken: text('access_token'),
-  refreshToken: text('refresh_token'),
-  idToken: text('id_token'),
-  accessTokenExpiresAt: timestamp('access_token_expires_at', { withTimezone: true }),
-  refreshTokenExpiresAt: timestamp('refresh_token_expires_at', { withTimezone: true }),
-  scope: text('scope'),
-  password: text('password'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-})
+export const accounts = pgTable(
+  'accounts',
+  {
+    id: text('id').primaryKey(),
+    accountId: text('account_id').notNull(),
+    providerId: text('provider_id').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    accessToken: text('access_token'),
+    refreshToken: text('refresh_token'),
+    idToken: text('id_token'),
+    accessTokenExpiresAt: timestamp('access_token_expires_at', { withTimezone: true }),
+    refreshTokenExpiresAt: timestamp('refresh_token_expires_at', { withTimezone: true }),
+    scope: text('scope'),
+    password: text('password'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // Rule 1. Also better-auth's credential lookup path on every sign-in.
+  (t) => [index('accounts_user_id_idx').on(t.userId)],
+)
 
 export const verifications = pgTable('verifications', {
   id: text('id').primaryKey(),
@@ -106,6 +126,9 @@ export const tenantMembers = pgTable(
   (t) => [
     primaryKey({ columns: [t.userId, t.tenantId] }),
     unique('tenant_members_user_id_unique').on(t.userId),
+    // Rule 1: the PK leads with user_id and the unique is user_id alone, so
+    // neither serves a predicate on tenant_id — including tenants' own cascade.
+    index('tenant_members_tenant_id_idx').on(t.tenantId),
     pgPolicy('tenant_members_self_isolation', {
       for: 'all',
       to: 'authenticated_backend',
@@ -155,6 +178,13 @@ export const clients = pgTable(
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (t) => [
+    // Rule 2: listClients filters on tenant_id (injected by the RLS policy below)
+    // AND `deleted_at is null`. Partial on purpose — a soft-deleted client is
+    // never listed, so indexing those rows would only grow the index. There is no
+    // FK on tenant_id, so rule 1 does not apply here.
+    index('clients_tenant_id_live_idx')
+      .on(t.tenantId)
+      .where(sql`deleted_at is null`),
     pgPolicy('clients_tenant_isolation', {
       for: 'all',
       to: 'authenticated_backend',
@@ -187,6 +217,13 @@ export const auditLog = pgTable(
     metadata: jsonb('metadata'),
   },
   (t) => [
+    // Rule 2, and the one that actually bites: this is the only monotonically
+    // growing table in the schema. tenant_id leads because the RLS policy below
+    // puts it in EVERY request-path predicate, so this also serves a tenant-wide
+    // read; client_id follows for exportClient's read and eraseClient's
+    // anonymization, which filter on both. Not partial: deny rows carry a null
+    // client_id and a tenant-wide audit read must still see them.
+    index('audit_log_tenant_id_client_id_idx').on(t.tenantId, t.clientId),
     pgPolicy('audit_log_tenant_isolation', {
       for: 'all',
       to: 'authenticated_backend',
@@ -222,6 +259,22 @@ export const clientConsents = pgTable(
     uniqueIndex('client_consents_one_active_per_scope')
       .on(t.clientId, t.scope)
       .where(sql`withdrawn_at is null`),
+    // Rule 1. The unique index above is PARTIAL, so it cannot serve clients'
+    // ON DELETE CASCADE, which must find withdrawn rows too — and eraseClient
+    // deletes that parent on the request path. Also serves exportClient's
+    // full-history read, which the partial index likewise cannot.
+    index('client_consents_client_id_idx').on(t.clientId),
+    // Pairs with assertScope in lib/consents.ts the same way the partial unique
+    // index pairs with withdrawConsent's withdraw-all: the runtime guard is then
+    // defence-in-depth rather than the only thing standing between a value out of
+    // JSON.parse and the table. Built FROM CONSENT_SCOPES, never a hand-copied
+    // list — a second copy is exactly the drift this constraint exists to stop.
+    // CHECK rather than a pg enum: extending a CHECK is a drop/add, whereas enum
+    // value ordering is painful. Retiring a scope is therefore a migration.
+    check(
+      'client_consents_scope_known',
+      sql.raw(`scope in (${CONSENT_SCOPES.map((s) => `'${s}'`).join(', ')})`),
+    ),
     pgPolicy('client_consents_tenant_isolation', {
       for: 'all',
       to: 'authenticated_backend',
