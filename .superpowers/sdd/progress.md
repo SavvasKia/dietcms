@@ -83,7 +83,7 @@ Task 6: complete (commits 47e1607, dd62567, 1d3a863, review Approved — verifie
   FOLLOW-UP (implementer recommendation, agreed): this is a lint rule wearing a test's clothes and will false-red on rename/style churn in the suite devs run on save. Better home is a CI-only policy gate (scripts/check-gdpr-coverage.ts as `pnpm check:gdpr`, or an ESLint rule). Left in tests/unit/ only because that is the only DB-free gate CI runs today.
   DONE 2026-09-19 — the gate moved to scripts/check-gdpr-coverage.mts, run as `pnpm check:gdpr` and wired into CI's test job between lint and `pnpm test`. tests/unit/gdpr-coverage.test.ts now holds ONLY fixture-based mechanism tests importing from that script (8 unit tests, was 5) — the parser stays in the fast suite, the policy verdict does not. Same mechanism, byte-for-byte: parser, traversal, the `(?!\s*:)` property-key exclusion and the entry-point-missing throw were moved unchanged. lib/gdpr.ts and db/schema.ts untouched.
     NEW, not a port — the vacuous-pass guard was rebuilt as a `missing-from-schema` violation. The old version hardcoded `expect(tables).toEqual(arrayContaining([...3 names...]))`; the gate now derives it from REGISTRY, so a registered table that discovery stops reporting (dropped, renamed, or `client_id` removed) reds by name instead of by a duplicated literal.
-    RUNNER: plain `node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-gdpr-coverage.mts` — zero new deps, Node 22.18+/24 type-stripping. `.mts` for unambiguous ESM; the disable-warning flag is targeted at MODULE_TYPELESS_PACKAGE_JSON only (db/schema.ts is a typeless .ts) rather than blanket `--no-warnings`, so real warnings still surface. tsconfig gained `allowImportingTsExtensions: true` — node's ESM resolver does no extension guessing, so the script must import `../db/schema.ts` with the extension; safe under the pre-existing `noEmit: true`, and `next build` verified green after the change.
+    RUNNER — SUPERSEDED SAME DAY, kept because the reasoning is the lesson. Originally plain `node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-gdpr-coverage.mts`, chosen to add zero dependencies, which forced `allowImportingTsExtensions: true` into tsconfig because node's ESM resolver does no extension guessing. The review found that flag could not be scoped: db/schema.ts is dual-use too (app code AND loaded by the gate), so the permission leaked into app code either way. "No new deps" had quietly bought a repo-wide type-system relaxation. Now `tsx scripts/check-gdpr-coverage.ts` with tsx an explicit devDependency (it was already present transitively), no flag anywhere, no `.mts`, no extension spellings. LESSON: price a dependency against what avoiding it costs elsewhere, not against zero.
     Forcing runs, each restored byte-identically (git diff --exit-code clean): F1 throwaway table with a client_id column -> `unregistered`, exit 1; F2 auditLog read deleted from exportClient while `auditLog: audit` property key left in place -> `uncovered`, exit 1 (so the property-key exclusion is STILL load-bearing after the move); F3 client_consents' client_id column renamed -> `missing-from-schema`, exit 1.
     F4 IS THE POINT OF THE CHANGE, and also its cost: with F2's breakage applied, `pnpm test` stays GREEN (12 files, 42 tests) and `pnpm check:gdpr` exits 1. A real coverage regression is now invisible locally and caught only in CI. That is the trade that was agreed — the false-red was landing on whoever renamed a helper — but do not expect the save-loop to catch this class any more.
     Gates after the move: typecheck, lint (eslint does lint the .mts — confirmed via a direct --format json run, not inferred from `eslint .` printing nothing), `pnpm test` 42/42, `pnpm check:gdpr` OK, `next build` green. Integration NOT re-run — unchanged by this and still blocked on a live DB.
@@ -158,3 +158,128 @@ authenticated_backend and its grants, which no migration in this repo
 creates from scratch), (2) create a Neon API key, (3) add repo secret
 NEON_API_KEY + repo variable NEON_PROJECT_ID. Will not go green until
 those three steps are done — cannot be verified from this sandbox.
+
+=== 2026-09-19 session: three deferred decisions closed, then reviewed ===
+Commits 10bb1f4, 81c6b13, 9786d8f, 6870a3e. All DB-free gates green:
+typecheck, lint, 54/54 unit, check:gdpr, check:migrations, next build.
+NOT run: integration. Migrations 0007 and 0008 are UNAPPLIED, and the new
+DB-level tests have therefore never executed. Everything below that says
+"verified" means verified without a database unless it names one.
+
+STALE ENTRY CORRECTED: fix/consent-grant-race was logged above as "OPEN,
+NOT MERGED". All three commits (9513c6d, 30f4f69, 1d22a3f) are ancestors of
+origin/main — only the branch ref is gone. Check reachability, not refs.
+
+CI SECRETS GATE — decided FAIL CLOSED, reversing this session's own first
+answer. The first version warned and skipped when NEON_API_KEY /
+NEON_PROJECT_ID were absent, so that pushing main would not go red. The
+altitude review named that for what it was: permanently normalising "the
+integration suite never runs", which is the failure this file already
+records once ("CI HAD NEVER RUN AT ALL"), except by design instead of by
+accident. It now fails with a message naming the three setup steps.
+  CONSEQUENCE, ACCEPTED: main is red until the Neon setup exists. Convenience
+  for whoever is pushing is not a reason to weaken the evidence base.
+  EXCEPTION, from the correctness review: fork PRs and Dependabot cannot see
+  secrets BY DESIGN, so a hard fail there reds a contributor with an
+  instruction they have no permission to follow. Those are skipped by a job
+  `if:`; every push to this repo still runs it.
+  No preflight job: `secrets` really is unreadable from a job-level `if:`
+  (only github/needs/vars/inputs), but a whole runner billed at 1-minute
+  granularity, on the critical path of every push, is the wrong price for
+  testing two variables. It is the first step of the job it guards.
+
+CONSENT SCOPE CHECK (migration 0007) — `client_consents_scope_known`, built
+FROM CONSENT_SCOPES via sql.raw, never a copied list. assertScope becomes
+defence-in-depth; retiring a scope becomes a migration. CHECK over a pg enum
+because extending a CHECK is a drop/add while enum value ordering is not.
+  CONSENT_SCOPES moved to db/consent-scopes.ts, a zero-import leaf, so
+  db/schema.ts can build the constraint without the cycle that importing
+  lib/consents.ts would create (lib/consents.ts -> db/authed-client ->
+  db/schema.ts). lib/consents.ts re-exports it; no caller changed. Named
+  re-export kept over `export *` deliberately: `export *` would silently
+  widen this module's public API if the leaf ever grows.
+  >>> THE TEST THAT COULD NOT FAIL. The first version asserted the rendered
+  CHECK's literals equalled CONSENT_SCOPES — but db/schema.ts BUILDS that
+  CHECK from CONSENT_SCOPES, so both sides were one constant. The reviewer
+  forced it: adding a scope without regenerating left typecheck, lint, the
+  unit suite and check:gdpr all green, while production Postgres would throw
+  23514 against migration 0007's old four literals. It now parses the
+  migration SQL on disk — a real second copy, written by a different tool at
+  a different time — and reds on exactly that. SIXTH vacuous-test catch in
+  this repo. A test comparing a value to itself reads exactly like a test.
+
+INDEX CONVENTION (migration 0008) — settled after deferring through Tasks 1,
+3 and 5. Two rules, nothing speculative:
+  1. every FK referencing column gets a NON-PARTIAL index. Postgres indexes
+     only the referenced side, so an un-indexed child seq-scans on every
+     parent DELETE, and four tables cascade. Found four: sessions.user_id,
+     accounts.user_id, tenant_members.tenant_id, client_consents.client_id —
+     that last hidden behind a PARTIAL unique index, which cannot serve a
+     cascade because a cascade must find withdrawn rows too.
+  2. columns lib/ actually filters on, where the table is unbounded:
+     audit_log(tenant_id, client_id), tenant_id leading because RLS puts it
+     in every request-path predicate; and a partial clients(tenant_id) WHERE
+     deleted_at is null for listClients.
+  Rule 1 is derived from schema metadata, so a future table is caught with no
+  list to extend — forced with a table carrying an unindexed FK, red by name.
+  Rule 2 is a hand-maintained list and should stay one: "what does lib/
+  filter on" is not recoverable from the schema, and auto-deriving it would
+  mean a second bespoke parser. Each entry names its query.
+  REVIEW FIX: covers() read only table-level primaryKeys/uniqueConstraints,
+  but drizzle reports column-level .primaryKey()/.unique() on the COLUMN
+  (users.id and sessions.token appear nowhere else). A future
+  `userId: text('user_id').primaryKey().references(...)` would have been
+  called uncovered and the message would have demanded a duplicate index.
+  STILL NOT PROVEN: no EXPLAIN anywhere. These indexes are justified by
+  reading predicates, not by observed plans, and the tables have ~zero rows.
+
+GDPR GATE — now an AST check. Moving it out of the save-loop suite fixed
+WHEN it runs; the review pointed out the mechanism was still regex plus
+brace counting, hand-deriving what a parser does — and that this repo had
+already made that exact call once, choosing AST for the `new Date` rule, for
+the same reason. Rewritten on the TypeScript compiler API. Closes gaps in
+BOTH directions the old version documented but could not fix: declaration
+styles it silently dropped (expression-bodied and parenless arrows, a brace
+inside a return-type annotation) surfaced as "not referenced" when the truth
+was "not parsed"; and comments, string literals and `{ shorthand }`
+properties counted as reads. Each has a fixture test.
+  STILL BLIND to a read reached through a helper in ANOTHER file — the block
+  map is module-local by construction. That produces a false RED, and the
+  message says so. Green here is still not GDPR assurance; the behavioural
+  proof is tests/integration/gdpr.test.ts.
+  NOT an ESLint rule: it needs getTableConfig on a runtime-imported
+  db/schema.ts (drizzle metadata is invisible to static analysis) and yields
+  one whole-repo verdict, not a per-file diagnostic.
+  THE COST OF THE SPLIT, unchanged: with a real read deleted, `pnpm test`
+  stays green and only `pnpm check:gdpr` reds. This class is now caught in CI
+  only. That was the trade — the false-red was landing on whoever renamed a
+  helper — but do not expect the save-loop to catch it.
+
+NEW GATE — `pnpm check:migrations` (scripts/check-migrations.ts). Runs
+drizzle-kit generate and fails if anything is produced: db/schema.ts
+declaring a table, index or constraint that no migration creates passes
+every other DB-free gate and reaches no database. The general form of the
+scope-drift bug above, covering all six new indexes too, none of which had
+their own assertion. No credentials needed, so it runs in the always-on job.
+  Its own first version was wrong in the same family: it deleted generated
+  files but left meta/_journal.json appended, because generation MODIFIES
+  that file rather than creating one. The forcing run caught it. It now
+  restores contents, not just file presence, and was re-forced on both paths.
+
+REVIEW FINDING WORTH REMEMBERING: tsconfig excluded scripts/ from typecheck,
+with a comment describing a setup two commits out of date. scripts/ was only
+checked incidentally, through the test that imports the gate — a second
+script would have shipped unchecked, since tsx strips types without checking
+them. Forced with a deliberately ill-typed probe file. Comments justifying a
+config exclusion decay silently; the exclusion outlives the reason.
+
+STILL OPEN / BLOCKED ON CREDENTIALS (unchanged by this session):
+  - `pnpm db:migrate` against the Neon dev DB: 0006, 0007, 0008 unapplied.
+  - `pnpm test:int` afterwards — auth-tables-privileges.test.ts (the 0006
+    REVOKE) and consents-rls.test.ts section 5b (the 0007 CHECK) have never
+    executed anywhere.
+  - BETTER_AUTH_SECRET + BETTER_AUTH_URL in Vercel for preview/production.
+  - Neon `ci-base` branch + API key + NEON_API_KEY / NEON_PROJECT_ID.
+  - Pushing main: never pushed this session (git rev-list --count
+    origin/main..main for the number). CI will be RED on arrival until the
+    Neon setup above exists. That redness is the point, not a regression.
