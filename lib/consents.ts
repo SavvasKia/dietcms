@@ -231,8 +231,11 @@ export async function withdrawConsent(
  * row can only have been granted after the last withdrawal — so tie-breaking
  * is not merely deterministic here, it is structurally absent.
  *
- * Scopes are filtered through CONSENT_SCOPES: the column has no CHECK, so a
- * value written out of band must not leak into the typed result.
+ * Scopes are still filtered through CONSENT_SCOPES even though migration 0007
+ * added `client_consents_scope_known`. The CHECK stops NEW out-of-band values;
+ * it says nothing about rows written before it existed, nor about a scope
+ * RETIRED from the union while its CHECK literal remains. This filter is what
+ * keeps such a row out of the typed result.
  */
 export function activeConsents(userId: string, clientId: string): Promise<ConsentScope[]> {
   return withUser(userId, async (tx) => {

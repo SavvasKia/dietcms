@@ -15,11 +15,27 @@ jobs:
       # lib/gdpr.ts, so rename/style churn can red it while the code is correct.
       # Kept out of `pnpm test` so that false red never lands in the save-loop.
       - run: pnpm check:gdpr
+      # Catches a db/schema.ts change with no migration: typecheck, lint and the
+      # unit suite all pass on one, and no database would ever have it. Needs no
+      # credentials (generate is a schema-vs-snapshot diff), so it belongs here
+      # rather than behind the Neon secrets.
+      - run: pnpm check:migrations
       - run: pnpm test
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e
 
   integration:
+    # Skipped only where the secrets are unavailable BY DESIGN and no
+    # contributor could fix it: GitHub withholds `secrets.*` from pull_request
+    # runs originating in a fork, and Dependabot reads a separate store. Without
+    # this, the fail-closed check below reds those PRs with an instruction
+    # ("add repo secret NEON_API_KEY") their author has no permission to follow.
+    # Every push to this repo still runs it, so the fail-closed property holds
+    # exactly where someone can act on it.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]')
     runs-on: ubuntu-latest
     steps:
       # FAILS the run when the Neon credentials are missing — it does not warn

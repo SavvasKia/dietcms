@@ -38,6 +38,15 @@ function covers(cfg: TableConfig): Cover[] {
     })),
     ...cfg.primaryKeys.map((p) => ({ cols: p.columns.map((c) => c.name), partial: false })),
     ...cfg.uniqueConstraints.map((u) => ({ cols: u.columns.map((c) => c.name), partial: false })),
+    // Column-level `.primaryKey()` / `.unique()` are reported on the COLUMN, not
+    // in primaryKeys/uniqueConstraints (verified: users.id and sessions.token
+    // appear nowhere else). Both create a btree index, so omitting them would
+    // false-red a table that is already covered — e.g. a future
+    // `userId: text('user_id').primaryKey().references(...)` — and the failure
+    // message would tell the developer to add a duplicate index.
+    ...cfg.columns
+      .filter((c) => c.primary || c.isUnique)
+      .map((c) => ({ cols: [c.name], partial: false })),
   ]
 }
 
@@ -57,6 +66,17 @@ describe('index convention', () => {
   it('discovers the schema tables (guards a vacuous pass below)', () => {
     expect(tables.map((t) => t.name)).toEqual(
       expect.arrayContaining(['clients', 'client_consents', 'audit_log', 'sessions', 'accounts']),
+    )
+  })
+
+  it('discovers the foreign keys (guards rule 1 against passing vacuously)', () => {
+    // Table discovery being non-empty is not enough: if `foreignKeys` came back
+    // empty for every table — say a drizzle bump changed how inline
+    // `.references()` is surfaced — rule 1's loop would push nothing and pass
+    // with every index in the schema deleted.
+    const fks = tables.flatMap((t) => t.foreignKeys.map(() => t.name))
+    expect(fks).toEqual(
+      expect.arrayContaining(['sessions', 'accounts', 'tenant_members', 'client_consents']),
     )
   })
 

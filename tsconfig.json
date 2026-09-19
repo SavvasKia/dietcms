@@ -30,9 +30,5 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  // scripts/ has its own config: it is run by plain `node`, whose ESM resolver
-  // does no extension guessing, so it needs allowImportingTsExtensions to spell
-  // `../db/schema.ts`. Kept out of the app config so that permission does not
-  // apply to app code, whose bundler resolution for that pattern is untested.
-  "exclude": ["node_modules", "scripts"]
+  "exclude": ["node_modules"]
 }
