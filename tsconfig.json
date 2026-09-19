@@ -10,6 +10,10 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
+    // scripts/check-gdpr-coverage.mts is run by plain `node`, whose ESM resolver
+    // does no extension guessing, so its import of db/schema must spell `.ts`.
+    // Safe here because the project is noEmit — nothing is rewritten on the way out.
+    "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,

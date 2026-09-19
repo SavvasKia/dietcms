@@ -11,6 +11,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
+      # Policy gate, not a unit test: its verdict depends on the source TEXT of
+      # lib/gdpr.ts, so rename/style churn can red it while the code is correct.
+      # Kept out of `pnpm test` so that false red never lands in the save-loop.
+      - run: pnpm check:gdpr
       - run: pnpm test
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e
