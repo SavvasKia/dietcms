@@ -58,6 +58,7 @@ export const ENTRY_POINTS = ['exportClient', 'eraseClient'] as const
 export const REGISTRY: Record<string, string> = {
   clients: 'clients',
   client_consents: 'clientConsents',
+  measurements: 'measurements',
   audit_log: 'auditLog',
 }
 

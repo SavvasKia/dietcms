@@ -1,6 +1,7 @@
 import { and, eq, isNull, sql } from 'drizzle-orm'
-import { authedDb, withUser } from '@/db/authed-client'
-import { clientConsents, clients, tenantMembers } from '@/db/schema'
+import { withUser } from '@/db/authed-client'
+import { clientConsents } from '@/db/schema'
+import { reachableClient, recordDeny } from '@/lib/client-access'
 import { recordAudit } from '@/lib/audit'
 
 // Defined in db/ so db/schema.ts can build the CHECK from the same list without
@@ -39,38 +40,6 @@ const dbNow = sql`now()`
 
 type Consent = typeof clientConsents.$inferSelect
 
-/**
- * The client, if the caller can reach it under RLS. Returns its `tenant_id`
- * too: the policy's USING clause only admits rows whose tenant_id equals the
- * caller's membership tenant, so a visible row's tenant_id *is* the caller's —
- * one round trip instead of a second membership lookup. Even if the policy were
- * later loosened, the insert's WITH CHECK still rejects a mismatch.
- *
- * This lookup is the fix for the plan's cross-tenant hole: the FK to clients.id
- * is satisfied by ANY existing client and the WITH CHECK only validates
- * tenant_id (the caller's own), so without it a caller can attach a consent row
- * in their own tenant that references another tenant's client — a foreign
- * identifier the victim can neither see nor erase.
- *
- * Takes the live `tx`: a nested withUser() would open a second pooled connection
- * with no app.user_id GUC and silently see zero rows.
- */
-async function reachableClient(
-  tx: typeof authedDb,
-  clientId: string,
-  opts: { lock?: boolean } = {},
-): Promise<{ id: string; tenantId: string } | null> {
-  const q = tx
-    .select({ id: clients.id, tenantId: clients.tenantId })
-    .from(clients)
-    .where(and(eq(clients.id, clientId), isNull(clients.deletedAt)))
-    .limit(1)
-  // `lock` is opt-in and used ONLY by grantConsent: taking a write lock on the
-  // read paths would stall every reader behind any in-flight grant.
-  const [row] = opts.lock ? await q.for('update') : await q
-  return row ?? null
-}
-
 /** The active row(s) for one client and scope — the predicate both the update
  *  statements and the partial unique index are built on. */
 function activeScope(clientId: string, scope: ConsentScope) {
@@ -79,38 +48,6 @@ function activeScope(clientId: string, scope: ConsentScope) {
     eq(clientConsents.scope, scope),
     isNull(clientConsents.withdrawnAt),
   )
-}
-
-/** Membership under RLS, or null when the caller has none. */
-async function callerTenantIdOrNull(tx: typeof authedDb): Promise<string | null> {
-  const [m] = await tx.select({ tenantId: tenantMembers.tenantId }).from(tenantMembers).limit(1)
-  return m?.tenantId ?? null
-}
-
-/**
- * Logs a denied per-client consent attempt, attributed to the CALLER's tenant.
- *
- * The attempted id is deliberately NOT recorded: it may belong to another tenant,
- * and this tenant's audit log would then permanently hold a foreign client
- * identifier that Task 5's tenant-scoped erasure can never reach (owner
- * decision, 2026-08-23 — carried over from lib/clients.ts).
- *
- * A caller with no membership cannot be logged on the request path at all — the
- * policy's WITH CHECK has no tenant to match — so that case is silently skipped
- * rather than turned into an exception. Throwing there was the regression that
- * had to be reverted from listClients.
- */
-async function recordDeny(tx: typeof authedDb): Promise<void> {
-  const tenantId = await callerTenantIdOrNull(tx)
-  if (!tenantId) return
-  await recordAudit(tx, {
-    action: 'deny',
-    entity: 'consent',
-    entityId: null,
-    clientId: null,
-    metadata: { outcome: 'denied' },
-    tenantId,
-  })
 }
 
 /**
@@ -144,7 +81,7 @@ export async function grantConsent(
     // are compatible with each other.
     const client = await reachableClient(tx, clientId, { lock: true })
     if (!client) {
-      await recordDeny(tx)
+      await recordDeny(tx, 'consent')
       return null
     }
 
@@ -194,7 +131,7 @@ export async function withdrawConsent(
   return withUser(userId, async (tx) => {
     const client = await reachableClient(tx, clientId)
     if (!client) {
-      await recordDeny(tx)
+      await recordDeny(tx, 'consent')
       return false
     }
 
@@ -241,7 +178,7 @@ export function activeConsents(userId: string, clientId: string): Promise<Consen
   return withUser(userId, async (tx) => {
     const client = await reachableClient(tx, clientId)
     if (!client) {
-      await recordDeny(tx)
+      await recordDeny(tx, 'consent')
       return []
     }
 

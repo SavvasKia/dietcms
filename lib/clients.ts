@@ -1,6 +1,7 @@
 import { and, eq, isNull, sql } from 'drizzle-orm'
-import { authedDb, withUser } from '@/db/authed-client'
-import { clients, tenantMembers } from '@/db/schema'
+import { withUser } from '@/db/authed-client'
+import { clients } from '@/db/schema'
+import { callerTenantId, callerTenantIdOrNull, recordDeny } from '@/lib/client-access'
 import { recordAudit } from '@/lib/audit'
 
 export type NewClient = {
@@ -64,48 +65,6 @@ const dbNow = sql`now()`
 
 type Client = typeof clients.$inferSelect
 
-// Reads the caller's tenant_id from tenant_members under RLS (returns only the
-// caller's own row). Throws if the caller has no membership — fail-closed.
-// Takes the live `tx`: calling withUser() here would open a second pooled
-// connection without the app.user_id GUC and silently see zero rows.
-async function callerTenantId(tx: typeof authedDb): Promise<string> {
-  const [m] = await tx.select({ tenantId: tenantMembers.tenantId }).from(tenantMembers).limit(1)
-  if (!m) throw new Error('no tenant for user')
-  return m.tenantId
-}
-
-/** Membership under RLS, or null when the caller has none. */
-async function callerTenantIdOrNull(tx: typeof authedDb): Promise<string | null> {
-  const [m] = await tx.select({ tenantId: tenantMembers.tenantId }).from(tenantMembers).limit(1)
-  return m?.tenantId ?? null
-}
-
-/**
- * Logs a denied per-client access attempt, attributed to the CALLER's tenant.
- *
- * The attempted id is deliberately NOT recorded: it may belong to another tenant,
- * and this tenant's audit log would then permanently hold a foreign client
- * identifier that Task 5's tenant-scoped erasure can never reach. The trade is
- * that we know a denied attempt happened and by whom, but not which record was
- * probed (owner decision, 2026-08-23).
- *
- * A caller with no membership cannot be logged on the request path at all — the
- * policy's WITH CHECK has no tenant to match — so that case is silently skipped
- * rather than turned into an exception.
- */
-async function recordDeny(tx: typeof authedDb): Promise<void> {
-  const tenantId = await callerTenantIdOrNull(tx)
-  if (!tenantId) return
-  await recordAudit(tx, {
-    action: 'deny',
-    entity: 'client',
-    entityId: null,
-    clientId: null,
-    metadata: { outcome: 'denied' },
-    tenantId,
-  })
-}
-
 export function createClient(userId: string, input: NewClient): Promise<Client> {
   return withUser(userId, async (tx) => {
     const tenantId = await callerTenantId(tx)
@@ -150,7 +109,7 @@ export function getClient(userId: string, clientId: string): Promise<Client | nu
     } else {
       // A miss is indistinguishable from a cross-tenant probe: RLS filters both
       // to the same empty result. Log it either way.
-      await recordDeny(tx)
+      await recordDeny(tx, 'client')
     }
     return row ?? null
   })
@@ -198,7 +157,7 @@ export function updateClient(
         clientId: row.id,
       })
     } else {
-      await recordDeny(tx)
+      await recordDeny(tx, 'client')
     }
     return row ?? null
   })
@@ -223,7 +182,7 @@ export function softDeleteClient(userId: string, clientId: string): Promise<bool
         clientId: rows[0].id,
       })
     } else {
-      await recordDeny(tx)
+      await recordDeny(tx, 'client')
     }
     return rows.length > 0
   })

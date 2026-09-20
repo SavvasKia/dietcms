@@ -5,6 +5,7 @@ import {
   timestamp,
   date,
   jsonb,
+  numeric,
   primaryKey,
   unique,
   uniqueIndex,
@@ -274,6 +275,86 @@ export const clientConsents = pgTable(
       sql.raw(`scope in (${CONSENT_SCOPES.map((s) => `'${s}'`).join(', ')})`),
     ),
     pgPolicy('client_consents_tenant_isolation', {
+      for: 'all',
+      to: 'authenticated_backend',
+      using: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,
+      withCheck: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,
+    }),
+  ],
+).enableRLS()
+
+// Anthropometry — the clinical dataset the practice actually records.
+// A measurement is a dated OBSERVATION of one client, not a mutable profile:
+// correcting a mistyped weight deletes the row and records a new one, which is
+// why lib/measurements.ts has no update path and this table has no updated_at.
+//
+// NO `bmi` COLUMN, deliberately. BMI is weight/height^2 and nothing else; a
+// stored copy goes stale the moment either input is corrected, and no query
+// filters on it. It is derived by `bmi()` in lib/measurements.ts.
+//
+// Every metric is NULLABLE — a weigh-in records weight alone far more often
+// than a full body-composition workup — but a row with NO metric at all is not
+// an observation, which `measurements_not_empty` enforces. `notes` does not
+// count: a note about nothing measured belongs on the client.
+//
+// numeric(mode: 'number') rather than the default string mapping: these are
+// arithmetic values (bmi(), trend deltas) and every call site would otherwise
+// open with a parseFloat. The magnitudes are far inside the range that mode
+// carries exactly, and numeric over real keeps 0.1 kg exact — a float column
+// would make two visually identical weights compare unequal.
+export const measurements = pgTable(
+  'measurements',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    clientId: uuid('client_id')
+      .notNull()
+      .references(() => clients.id, { onDelete: 'cascade' }),
+    // The clinical date, caller-supplied so a past weigh-in can be entered, and
+    // defaulted to the DB clock like every other timestamp here. NOT CHECKed
+    // against the future: a CHECK may only call IMMUTABLE functions and now()
+    // is STABLE. That guard belongs at the route layer.
+    measuredAt: timestamp('measured_at', { withTimezone: true }).notNull().defaultNow(),
+    weightKg: numeric('weight_kg', { precision: 5, scale: 2, mode: 'number' }),
+    heightCm: numeric('height_cm', { precision: 5, scale: 1, mode: 'number' }),
+    bodyFatPct: numeric('body_fat_pct', { precision: 4, scale: 1, mode: 'number' }),
+    waistCm: numeric('waist_cm', { precision: 5, scale: 1, mode: 'number' }),
+    hipCm: numeric('hip_cm', { precision: 5, scale: 1, mode: 'number' }),
+    notes: text('notes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Rule 1 (FK index) and rule 2 in one: every read is "this client's
+    // measurements, newest first", and clients' ON DELETE CASCADE must find
+    // every row for a client. client_id LEADS, so this also serves the bare
+    // client_id lookup the cascade needs — (measured_at, client_id) would
+    // satisfy neither.
+    index('measurements_client_id_measured_at_idx').on(t.clientId, t.measuredAt),
+    // Bounds, not clinical judgment: they reject a transposed digit or a value
+    // entered in the wrong unit, and nothing narrower. Pairs with the route
+    // layer the way client_consents_scope_known pairs with assertScope.
+    check(
+      'measurements_weight_kg_range',
+      sql`weight_kg is null or (weight_kg > 0 and weight_kg < 1000)`,
+    ),
+    check(
+      'measurements_height_cm_range',
+      sql`height_cm is null or (height_cm > 0 and height_cm < 300)`,
+    ),
+    check(
+      'measurements_body_fat_pct_range',
+      sql`body_fat_pct is null or (body_fat_pct >= 0 and body_fat_pct <= 100)`,
+    ),
+    check('measurements_waist_cm_range', sql`waist_cm is null or (waist_cm > 0 and waist_cm < 500)`),
+    check('measurements_hip_cm_range', sql`hip_cm is null or (hip_cm > 0 and hip_cm < 500)`),
+    // An all-null row is not an observation. Without this, an empty form
+    // persists a dated blank line in the history that also counts toward the
+    // GDPR export.
+    check(
+      'measurements_not_empty',
+      sql`weight_kg is not null or height_cm is not null or body_fat_pct is not null or waist_cm is not null or hip_cm is not null`,
+    ),
+    pgPolicy('measurements_tenant_isolation', {
       for: 'all',
       to: 'authenticated_backend',
       using: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,

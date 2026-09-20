@@ -14,10 +14,18 @@ import { describe, it, expect, afterAll, beforeAll } from 'vitest'
 import { and, eq, inArray } from 'drizzle-orm'
 import { db } from '../../db/client'
 import { withUser } from '../../db/authed-client'
-import { tenants, tenantMembers, clients, clientConsents, auditLog } from '../../db/schema'
+import {
+  tenants,
+  tenantMembers,
+  clients,
+  clientConsents,
+  measurements,
+  auditLog,
+} from '../../db/schema'
 import { recordAudit } from '../../lib/audit'
 import { createClient, getClient, softDeleteClient } from '../../lib/clients'
 import { grantConsent } from '../../lib/consents'
+import { recordMeasurement } from '../../lib/measurements'
 import { exportClient, eraseClient } from '../../lib/gdpr'
 
 type AuditRow = typeof auditLog.$inferSelect
@@ -40,6 +48,7 @@ async function reap(tenantId: string, userIds: string[]) {
     await db.delete(auditLog).where(eq(auditLog.actorUserId, userId))
   }
   await db.delete(clientConsents).where(eq(clientConsents.tenantId, tenantId))
+  await db.delete(measurements).where(eq(measurements.tenantId, tenantId))
   await db.delete(clients).where(eq(clients.tenantId, tenantId))
   for (const userId of userIds) {
     await db.delete(tenantMembers).where(eq(tenantMembers.userId, userId))
@@ -105,6 +114,11 @@ describe('exportClient', () => {
     clientId = c.id
     await grantConsent(userA, clientId, 'email_comms', 'v1-el')
     await grantConsent(userA, clientId, 'marketing', 'v1-el')
+    await recordMeasurement(userA, clientId, {
+      measuredAt: '2026-03-01T09:00:00Z',
+      weightKg: 82.5,
+      heightCm: 178,
+    })
     await getClient(userA, clientId)
   })
   afterAll(async () => {
@@ -121,8 +135,16 @@ describe('exportClient', () => {
     expect(dump?.client.email).toBe('giorgos@example.gr')
     expect(dump?.client.notes).toBe('clinical note')
     expect(dump?.consents.map((c) => c.scope).sort()).toEqual(['email_comms', 'marketing'])
-    // create(client) + create(consent) x2 + view = 4 at minimum.
-    expect(dump!.auditLog.length).toBeGreaterThanOrEqual(4)
+    // Special-category health data: Art 15 owes the VALUES, not a count. The
+    // numeric columns must also arrive as numbers — drizzle maps numeric to a
+    // string by default, and an export of "82.50" would be a silent type change
+    // for every consumer of ClientExport.
+    expect(dump?.measurements).toHaveLength(1)
+    expect(dump!.measurements[0].weightKg).toBe(82.5)
+    expect(dump!.measurements[0].heightCm).toBe(178)
+    expect(dump!.measurements[0].measuredAt.toISOString()).toBe('2026-03-01T09:00:00.000Z')
+    // create(client) + create(consent) x2 + create(measurement) + view = 5 min.
+    expect(dump!.auditLog.length).toBeGreaterThanOrEqual(5)
     for (const row of dump!.auditLog) {
       expect(row.clientId).toBe(clientId)
       expect(row.tenantId).toBe(tenantIdA)
@@ -144,8 +166,12 @@ describe('exportClient', () => {
     expect(row.tenantId).toBe(tenantIdA)
     // PII-free scale of what was disclosed. Asserted so the shape cannot drift
     // into something the denylist would have to catch.
-    expect(row.metadata).toEqual({ consents: 2, auditRows: expect.any(Number) })
-    expect((row.metadata as { auditRows: number }).auditRows).toBeGreaterThanOrEqual(4)
+    expect(row.metadata).toEqual({
+      consents: 2,
+      measurements: 1,
+      auditRows: expect.any(Number),
+    })
+    expect((row.metadata as { auditRows: number }).auditRows).toBeGreaterThanOrEqual(5)
   })
 
   it('a cross-tenant export returns null, denies, and discloses nothing', async () => {
@@ -222,6 +248,12 @@ describe('eraseClient blast radius', () => {
     await grantConsent(userA, erasedId, 'marketing', 'v1-el')
     await grantConsent(userA, siblingId, 'email_comms', 'v1-el')
     await grantConsent(userB, otherTenantClientId, 'email_comms', 'v1-el')
+    // Two on the erased client, so "all of them went" is distinguishable from
+    // "one of them went"; one each on the two clients that must survive.
+    await recordMeasurement(userA, erasedId, { weightKg: 90 })
+    await recordMeasurement(userA, erasedId, { weightKg: 89.4, bodyFatPct: 31.2 })
+    await recordMeasurement(userA, siblingId, { weightKg: 71 })
+    await recordMeasurement(userB, otherTenantClientId, { weightKg: 64 })
     await getClient(userA, erasedId)
     await getClient(userA, siblingId)
 
@@ -259,6 +291,12 @@ describe('eraseClient blast radius', () => {
     expect(await db.select().from(clients).where(eq(clients.id, erasedId))).toHaveLength(0)
     expect(
       await db.select().from(clientConsents).where(eq(clientConsents.clientId, erasedId)),
+    ).toHaveLength(0)
+    // Read through the OWNER connection: a request-path read would return []
+    // for a deleted client either way, so it could not tell "erased" from
+    // "invisible". Both rows, not just the latest.
+    expect(
+      await db.select().from(measurements).where(eq(measurements.clientId, erasedId)),
     ).toHaveLength(0)
   })
 
@@ -317,6 +355,9 @@ describe('eraseClient blast radius', () => {
     expect(
       await db.select().from(clientConsents).where(eq(clientConsents.clientId, siblingId)),
     ).toHaveLength(1)
+    expect(
+      await db.select().from(measurements).where(eq(measurements.clientId, siblingId)),
+    ).toHaveLength(1)
   })
 
   it("leaves the second tenant's own rows untouched", async () => {
@@ -328,6 +369,9 @@ describe('eraseClient blast radius', () => {
     }
     expect(
       await db.select().from(clients).where(eq(clients.id, otherTenantClientId)),
+    ).toHaveLength(1)
+    expect(
+      await db.select().from(measurements).where(eq(measurements.clientId, otherTenantClientId)),
     ).toHaveLength(1)
   })
 

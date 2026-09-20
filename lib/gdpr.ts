@@ -1,12 +1,13 @@
 import { and, eq } from 'drizzle-orm'
 import { authedDb, withUser } from '@/db/authed-client'
 import { db } from '@/db/client'
-import { auditLog, clientConsents, clients, tenantMembers } from '@/db/schema'
+import { auditLog, clientConsents, clients, measurements, tenantMembers } from '@/db/schema'
 import { recordAudit } from '@/lib/audit'
 
 export type ClientExport = {
   client: typeof clients.$inferSelect
   consents: (typeof clientConsents.$inferSelect)[]
+  measurements: (typeof measurements.$inferSelect)[]
   auditLog: (typeof auditLog.$inferSelect)[]
 }
 
@@ -110,6 +111,14 @@ export function exportClient(userId: string, clientId: string): Promise<ClientEx
       .select()
       .from(clientConsents)
       .where(eq(clientConsents.clientId, client.id))
+    // Read directly, not through listMeasurements: that helper filters
+    // soft-deleted clients out (returning [] plus a spurious deny row for
+    // exactly the clients most likely to be exported) and writes a `view`
+    // audit row of its own, which would land inside this export's own dump.
+    const measured = await tx
+      .select()
+      .from(measurements)
+      .where(eq(measurements.clientId, client.id))
     const audit = await tx.select().from(auditLog).where(eq(auditLog.clientId, client.id))
 
     // Written after the reads, so the export row is not part of its own dump.
@@ -120,10 +129,14 @@ export function exportClient(userId: string, clientId: string): Promise<ClientEx
       entity: 'client',
       entityId: client.id,
       clientId: client.id,
-      metadata: { consents: consents.length, auditRows: audit.length },
+      metadata: {
+        consents: consents.length,
+        measurements: measured.length,
+        auditRows: audit.length,
+      },
       tenantId: client.tenantId,
     })
-    return { client, consents, auditLog: audit }
+    return { client, consents, measurements: measured, auditLog: audit }
   })
 }
 
@@ -198,9 +211,12 @@ export async function eraseClient(userId: string, clientId: string): Promise<boo
 
   // --- Step 3: destroy the clinical rows, then record the erasure. ---------
   return withUser(userId, async (tx) => {
-    // Explicit, though `client_consents.client_id` cascades: the per-table
-    // policy is stated in code, not left to a constraint.
+    // Explicit, though both FKs cascade: the per-table policy is stated in
+    // code, not left to a constraint. Measurements are special-category health
+    // data with no retention basis of their own — nothing about them is
+    // anonymizable, so Art 17 is a plain delete.
     await tx.delete(clientConsents).where(eq(clientConsents.clientId, target.id))
+    await tx.delete(measurements).where(eq(measurements.clientId, target.id))
     const deleted = await tx
       .delete(clients)
       .where(eq(clients.id, target.id))
