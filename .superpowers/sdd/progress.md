@@ -373,3 +373,67 @@ STILL NOT BUILT (feature backlog, in the order I would take it):
      service, used only as a fixture by rls-isolation.test.ts. Either drop
      it or give it a client_id and GDPR coverage. It is neither today, and
      the coverage tripwire skips it because it is not client-scoped.
+
+=== 2026-09-21: appointments (2233a10) — increment 2 of the domain schema ===
+Same shape as measurements: client-scoped, RLS+FORCE, cascading FK, GDPR
+export+erase wired, audited in the mutation's own transaction. Decisions:
+  NO DELETE PATH. An appointment is a PLAN that acquires an outcome, and
+  cancelled vs no_show is a real distinction to a practice (one is the client
+  telling you, the other is finding out at the appointment time). Deleting the
+  row destroys both, so status is how an appointment leaves the calendar.
+  NO STAFF COLUMN. ensureTenantForUser makes one tenant per user and
+  tenant_members is unique on user_id, so every tenant has exactly one member
+  TODAY. A staff column would be a NOT NULL that is always the same value, and
+  the overlap constraint would need rewriting the day it stopped being.
+  Multi-practitioner is a migration that touches both together — recorded here
+  rather than half-built.
+  db/appointment-statuses.ts copies db/consent-scopes.ts exactly (zero-import
+  leaf, CHECK built via sql.raw, never a hand-copied list).
+
+>>> appointments_no_overlap — an EXCLUDE constraint, HAND-WRITTEN into
+migration 0010 because drizzle-kit cannot express one. Chosen over a
+read-then-write check in lib/: that is the SAME TOCTOU race the consent grant
+had (two concurrent bookings both see a free slot, both insert), which needed
+a FOR UPDATE to close. An exclusion constraint has no window. The service only
+translates 23P01 into AppointmentOverlapError — a conflict the USER resolves,
+so it is typed, and distinguishable from null ("no such client") and from a
+caller bug. Three parts, each load-bearing:
+  tenant_id WITH =  conflicts stay inside one practice, so a rejection can
+                    never disclose that a foreign tenant holds that slot.
+  tstzrange '[)'    back-to-back appointments do not overlap; with '[]' every
+                    consecutive booking would be rejected.
+  WHERE status in   partial on BLOCKING_STATUSES — a cancelled appointment
+                    frees its slot instead of blocking rebooking forever.
+NEITHER the constraint NOR `CREATE EXTENSION btree_gist` is in drizzle's
+snapshot, so check:migrations is blind to both — the exact class FORCE ROW
+LEVEL SECURITY is in. tests/unit/appointment-constraints.test.ts guards the
+statement's presence and shape; the behaviour is integration-only.
+
+REUSE: tests/helpers/migration-sql.ts. consent-scope-check's migration parsing
+was extracted rather than copied when the appointment status CHECK needed the
+same thing; that test now uses it and was RE-FORCED (adding a scope without
+regenerating still reds it), because a refactor of a gate is a change to the
+gate until it has been seen to fail again.
+
+FORCING RUNS (all restored byte-identically):
+  - drop the EXCLUDE line from 0010      -> 4 assertions red
+  - remove its WHERE clause              -> "is partial on exactly BLOCKING_STATUSES"
+  - '[)' -> '[]'                         -> "uses a half-open range"
+  - consent scope drift after the refactor -> still red
+  - unregistered GDPR table, schema-without-migration, and MISSING FORCE all
+    red before being fixed. force-rls, added the day before, caught migration
+    0010 on the very next table it could have caught.
+
+NOT VERIFIED: 0010 is UNAPPLIED. The EXCLUDE statement and the btree_gist
+extension have NEVER BEEN EXECUTED ANYWHERE — if either is wrong the migration
+fails on apply, and no gate in this repo can tell. That is the single riskiest
+thing in the last two commits. tests/integration/appointments-rls.test.ts has
+never run.
+
+REMAINING FEATURE BACKLOG (unchanged order):
+  1. meal plans, documents (documents needs a blob store decision first).
+  2. The delivery layer — still no route, action or screen reaches any service.
+  3. GDPR Art 15/20 delivery: exportClient returns a TS object, nothing
+     serialises it or hands it to the data subject; no erasure REQUEST path.
+  4. Consent text corpus (text_version versions wording nothing defines).
+  5. The orphan `notes` table.
