@@ -280,6 +280,8 @@ STILL OPEN / BLOCKED ON CREDENTIALS (unchanged by this session):
     executed anywhere.
   - BETTER_AUTH_SECRET + BETTER_AUTH_URL in Vercel for preview/production.
   - Neon `ci-base` branch + API key + NEON_API_KEY / NEON_PROJECT_ID.
-  - Pushing main: never pushed this session (git rev-list --count
-    origin/main..main for the number). CI will be RED on arrival until the
-    Neon setup above exists. That redness is the point, not a regression.
+  - PUSHED 2026-09-19 (da4e7eb..ec733d5, 23 commits), owner decision, with
+    the red CI accepted knowingly. Expect the integration job to FAIL until
+    the Neon setup above exists; its message names the three steps. The test
+    job (typecheck, lint, check:gdpr, check:migrations, unit, e2e) should be
+    green — if it is not, that is a real regression, not the known gap.
