@@ -285,3 +285,91 @@ STILL OPEN / BLOCKED ON CREDENTIALS (unchanged by this session):
     the Neon setup above exists; its message names the three steps. The test
     job (typecheck, lint, check:gdpr, check:migrations, unit, e2e) should be
     green — if it is not, that is a real regression, not the known gap.
+
+=== 2026-09-20: measurements — first clinical domain table (f7d3ee0) ===
+Feature audit first: the backend was complete (clients, consents, audit,
+GDPR) and the PRODUCT was not. app/ holds sign-in, sign-up and a one-line
+dashboard; not one of the 11 service functions is reachable from a browser.
+Ordering chosen: domain schema BEFORE UI, so client screens are not built
+twice. This is increment 1 of that.
+
+MEASUREMENTS (migration 0009) — anthropometry, client-scoped, RLS+FORCE,
+FK cascade. Decisions worth keeping:
+  NO bmi COLUMN. It is weight/height^2 and nothing else; a stored copy goes
+  stale the moment either input is corrected and no query filters on it.
+  Derived by bmi() in lib/measurements.ts, which returns NULL rather than
+  Infinity/NaN for a non-positive height — it is called on UNSAVED form
+  input too, where the CHECKs have not yet had a say.
+  numeric(mode:'number'), not the drizzle default: the default maps numeric
+  to a STRING, so every call site would open with a parseFloat and bmi()
+  would silently produce NaN. Asserted in the integration test, because
+  nothing else pins that config.
+  measurements_not_empty: a row with no metric is not an observation.
+  `notes` deliberately does not satisfy it — a note about nothing measured
+  belongs on the client.
+  HARD delete, unlike clients. The only reason to remove an observation is
+  that it was mistyped, and a soft-deleted typo is a row every future reader
+  must filter forever. Consents are the opposite case (the history IS the
+  evidence) and stay immortal. The divergence is deliberate; the audit row
+  survives either way.
+  measured_at is cast in SQL (`${iso}::timestamptz`), not `new Date(...)`:
+  the DB-clock lint rule bans that constructor in lib/, and Postgres
+  validates the literal — a malformed instant is a 22007 at insert instead
+  of an Invalid Date persisted as NULL.
+
+>>> NEW GATE, and the real find of this session: tests/unit/force-rls.test.ts.
+`.enableRLS()` emits ENABLE ROW LEVEL SECURITY and NOTHING ELSE — drizzle-kit
+has no concept of FORCE — so `ALTER TABLE x FORCE ROW LEVEL SECURITY` has
+been appended BY HAND to every migration since 0001. check:migrations cannot
+see its absence, because FORCE is not part of the snapshot drizzle diffs.
+Migration 0009 as generated was missing it and every gate was green. Without
+FORCE the table OWNER is exempt from its own policies — and the owner
+connection is what runs migrations and eraseClient's audit anonymization, so
+one owner-path query reads across every tenant. The test takes the RLS flag
+from schema metadata and the FORCE statements from the SQL on disk: two real
+copies, which is the lesson from the tautological scope test.
+
+REFACTOR: lib/client-access.ts. reachableClient / callerTenantId /
+callerTenantIdOrNull / recordDeny were about to exist in FOUR copies;
+clients.ts and consents.ts moved onto it, and recordDeny now takes the
+`entity` explicitly so a refused measurement is distinguishable from a
+refused client in the audit trail. lib/gdpr.ts deliberately keeps its own
+copies, for two reasons that agree: its reachableClient must find
+SOFT-DELETED clients (a soft delete is what precedes an erasure request),
+and scripts/check-gdpr-coverage.ts only follows helpers declared INSIDE
+lib/gdpr.ts — moving that read out would red the gate against correct code.
+
+FORCING RUNS (all restored byte-identically):
+  - check:gdpr red on the unregistered table, then again on the uncovered
+    one. >>> THE FIRST ATTEMPT WAS INVALID: it removed `.from(measurements)`
+    but left `.where(eq(measurements.clientId, ...))`, so the identifier was
+    still read as a value and the gate stayed green — CORRECTLY. A forcing
+    run that does not go red is a claim about the forcing run first.
+  - index convention rule 1 red by name when the FK index was removed; the
+    rule is derived from metadata, so it caught a table written after it.
+  - force-rls red on `measurements` before the FORCE line was added by hand.
+  - check:migrations red on the schema change before 0009 was generated.
+
+NEVER EXECUTED (same blocker as everything below): migration 0009 is
+UNAPPLIED, so tests/integration/measurements-rls.test.ts has never run —
+including its DB-level section, which goes AROUND the service on purpose to
+prove the CHECKs hold for a caller that does not come through
+lib/measurements.ts. The clients.ts/consents.ts move onto client-access.ts
+is covered only by typecheck and lint here; its behavioural proof is the
+integration suite that needs the same missing database. One existing
+assertion was updated, not just extended: the export audit metadata shape
+now carries `measurements`.
+
+STILL NOT BUILT (feature backlog, in the order I would take it):
+  1. Remaining domain schema: appointments, meal plans, documents.
+  2. The whole delivery layer — no route, server action or screen reaches
+     any service. A dietitian still cannot add a client.
+  3. GDPR Art 15/20 DELIVERY: exportClient returns a TS object; nothing
+     serialises it to a portable file or hands it to the data subject, and
+     there is no erasure REQUEST path.
+  4. Consent text corpus: text_version is a free string and nothing defines
+     or renders the wording it versions.
+  5. The `notes` table is still an orphan — tenant-scoped, no client_id, no
+     service, used only as a fixture by rls-isolation.test.ts. Either drop
+     it or give it a client_id and GDPR coverage. It is neither today, and
+     the coverage tripwire skips it because it is not client-scoped.
