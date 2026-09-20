@@ -14,6 +14,7 @@ import {
 import { check, index, pgPolicy } from 'drizzle-orm/pg-core'
 import { sql } from 'drizzle-orm'
 import { CONSENT_SCOPES } from './consent-scopes'
+import { APPOINTMENT_STATUSES } from './appointment-statuses'
 
 // better-auth owns this schema directly (app-owned, not Neon-managed). Plain
 // tables, no RLS: better-auth reads/writes them through the owner pool
@@ -355,6 +356,60 @@ export const measurements = pgTable(
       sql`weight_kg is not null or height_cm is not null or body_fat_pct is not null or waist_cm is not null or hip_cm is not null`,
     ),
     pgPolicy('measurements_tenant_isolation', {
+      for: 'all',
+      to: 'authenticated_backend',
+      using: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,
+      withCheck: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,
+    }),
+  ],
+).enableRLS()
+
+// Appointments. Client-scoped like measurements, but unlike a measurement an
+// appointment is a PLAN that later acquires an outcome, so it carries a status
+// and is never hard-deleted: "cancelled" and "no_show" are findings about the
+// practice, and deleting the row destroys them.
+//
+// NO staff/practitioner column, deliberately. ensureTenantForUser creates one
+// tenant per user and tenant_members is unique on user_id, so every tenant has
+// exactly one member today — a staff column would be a NOT NULL that is always
+// the same value, and the overlap constraint below would need rewriting the day
+// it stopped being. Adding multi-practitioner support is a migration that
+// touches both, together.
+export const appointments = pgTable(
+  'appointments',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    clientId: uuid('client_id')
+      .notNull()
+      .references(() => clients.id, { onDelete: 'cascade' }),
+    startsAt: timestamp('starts_at', { withTimezone: true }).notNull(),
+    endsAt: timestamp('ends_at', { withTimezone: true }).notNull(),
+    status: text('status').notNull().default('scheduled'),
+    location: text('location'),
+    notes: text('notes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Rule 1 (the FK) and rule 2 (one client's upcoming appointments) in one,
+    // client_id leading so it also serves the bare cascade lookup.
+    index('appointments_client_id_starts_at_idx').on(t.clientId, t.startsAt),
+    // Rule 2, second query: the practice calendar is a tenant-wide date range
+    // with no client filter, and it is the read that runs on every page load.
+    index('appointments_tenant_id_starts_at_idx').on(t.tenantId, t.startsAt),
+    // Built FROM APPOINTMENT_STATUSES via sql.raw, never a hand-copied list —
+    // the same pairing as client_consents_scope_known with assertScope.
+    check(
+      'appointments_status_known',
+      sql.raw(`status in (${APPOINTMENT_STATUSES.map((s) => `'${s}'`).join(', ')})`),
+    ),
+    // A zero-length or inverted appointment is not a booking. Strict `>`: an
+    // appointment that ends when it starts occupies no time, and the overlap
+    // constraint in migration 0010 uses a half-open range, which would treat it
+    // as empty and let it double-book anything.
+    check('appointments_ends_after_starts', sql`ends_at > starts_at`),
+    pgPolicy('appointments_tenant_isolation', {
       for: 'all',
       to: 'authenticated_backend',
       using: sql`${t.tenantId} = (select tenant_id from tenant_members where user_id = current_setting('app.user_id', true) limit 1)`,

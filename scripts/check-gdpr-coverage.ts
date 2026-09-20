@@ -59,6 +59,7 @@ export const REGISTRY: Record<string, string> = {
   clients: 'clients',
   client_consents: 'clientConsents',
   measurements: 'measurements',
+  appointments: 'appointments',
   audit_log: 'auditLog',
 }
 

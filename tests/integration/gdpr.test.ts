@@ -19,6 +19,7 @@ import {
   tenantMembers,
   clients,
   clientConsents,
+  appointments,
   measurements,
   auditLog,
 } from '../../db/schema'
@@ -26,6 +27,7 @@ import { recordAudit } from '../../lib/audit'
 import { createClient, getClient, softDeleteClient } from '../../lib/clients'
 import { grantConsent } from '../../lib/consents'
 import { recordMeasurement } from '../../lib/measurements'
+import { scheduleAppointment } from '../../lib/appointments'
 import { exportClient, eraseClient } from '../../lib/gdpr'
 
 type AuditRow = typeof auditLog.$inferSelect
@@ -49,6 +51,7 @@ async function reap(tenantId: string, userIds: string[]) {
   }
   await db.delete(clientConsents).where(eq(clientConsents.tenantId, tenantId))
   await db.delete(measurements).where(eq(measurements.tenantId, tenantId))
+  await db.delete(appointments).where(eq(appointments.tenantId, tenantId))
   await db.delete(clients).where(eq(clients.tenantId, tenantId))
   for (const userId of userIds) {
     await db.delete(tenantMembers).where(eq(tenantMembers.userId, userId))
@@ -119,6 +122,11 @@ describe('exportClient', () => {
       weightKg: 82.5,
       heightCm: 178,
     })
+    await scheduleAppointment(userA, clientId, {
+      startsAt: '2026-03-08T09:00:00Z',
+      endsAt: '2026-03-08T09:45:00Z',
+      location: 'Athens clinic',
+    })
     await getClient(userA, clientId)
   })
   afterAll(async () => {
@@ -143,8 +151,15 @@ describe('exportClient', () => {
     expect(dump!.measurements[0].weightKg).toBe(82.5)
     expect(dump!.measurements[0].heightCm).toBe(178)
     expect(dump!.measurements[0].measuredAt.toISOString()).toBe('2026-03-01T09:00:00.000Z')
-    // create(client) + create(consent) x2 + create(measurement) + view = 5 min.
-    expect(dump!.auditLog.length).toBeGreaterThanOrEqual(5)
+    // When a person attended a dietitian is data about them, so Art 15 owes the
+    // appointment too — including a cancelled one, which this client has none of.
+    expect(dump?.appointments).toHaveLength(1)
+    expect(dump!.appointments[0].location).toBe('Athens clinic')
+    expect(dump!.appointments[0].startsAt.toISOString()).toBe('2026-03-08T09:00:00.000Z')
+    expect(dump!.appointments[0].status).toBe('scheduled')
+    // create(client) + create(consent) x2 + create(measurement) +
+    // create(appointment) + view = 6 minimum.
+    expect(dump!.auditLog.length).toBeGreaterThanOrEqual(6)
     for (const row of dump!.auditLog) {
       expect(row.clientId).toBe(clientId)
       expect(row.tenantId).toBe(tenantIdA)
@@ -169,9 +184,10 @@ describe('exportClient', () => {
     expect(row.metadata).toEqual({
       consents: 2,
       measurements: 1,
+      appointments: 1,
       auditRows: expect.any(Number),
     })
-    expect((row.metadata as { auditRows: number }).auditRows).toBeGreaterThanOrEqual(5)
+    expect((row.metadata as { auditRows: number }).auditRows).toBeGreaterThanOrEqual(6)
   })
 
   it('a cross-tenant export returns null, denies, and discloses nothing', async () => {
@@ -254,6 +270,22 @@ describe('eraseClient blast radius', () => {
     await recordMeasurement(userA, erasedId, { weightKg: 89.4, bodyFatPct: 31.2 })
     await recordMeasurement(userA, siblingId, { weightKg: 71 })
     await recordMeasurement(userB, otherTenantClientId, { weightKg: 64 })
+    // Non-overlapping WITHIN tenant A: appointments_no_overlap is scoped to one
+    // tenant, so the erased client and the sibling cannot share a slot. Tenant
+    // B reuses tenant A's first slot deliberately — proving that constraint
+    // really is per-tenant and never reveals a foreign calendar.
+    await scheduleAppointment(userA, erasedId, {
+      startsAt: '2026-06-01T08:00:00Z',
+      endsAt: '2026-06-01T09:00:00Z',
+    })
+    await scheduleAppointment(userA, siblingId, {
+      startsAt: '2026-06-01T09:00:00Z',
+      endsAt: '2026-06-01T10:00:00Z',
+    })
+    await scheduleAppointment(userB, otherTenantClientId, {
+      startsAt: '2026-06-01T08:00:00Z',
+      endsAt: '2026-06-01T09:00:00Z',
+    })
     await getClient(userA, erasedId)
     await getClient(userA, siblingId)
 
@@ -297,6 +329,9 @@ describe('eraseClient blast radius', () => {
     // "invisible". Both rows, not just the latest.
     expect(
       await db.select().from(measurements).where(eq(measurements.clientId, erasedId)),
+    ).toHaveLength(0)
+    expect(
+      await db.select().from(appointments).where(eq(appointments.clientId, erasedId)),
     ).toHaveLength(0)
   })
 
@@ -358,6 +393,9 @@ describe('eraseClient blast radius', () => {
     expect(
       await db.select().from(measurements).where(eq(measurements.clientId, siblingId)),
     ).toHaveLength(1)
+    expect(
+      await db.select().from(appointments).where(eq(appointments.clientId, siblingId)),
+    ).toHaveLength(1)
   })
 
   it("leaves the second tenant's own rows untouched", async () => {
@@ -372,6 +410,9 @@ describe('eraseClient blast radius', () => {
     ).toHaveLength(1)
     expect(
       await db.select().from(measurements).where(eq(measurements.clientId, otherTenantClientId)),
+    ).toHaveLength(1)
+    expect(
+      await db.select().from(appointments).where(eq(appointments.clientId, otherTenantClientId)),
     ).toHaveLength(1)
   })
 
